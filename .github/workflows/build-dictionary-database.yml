@@ -7,7 +7,7 @@ on:
         description: "Optional maximum English records (leave blank for full build)"
         required: false
         type: string
-        default: "1000"
+        default: ""
 
 permissions:
   contents: read
