@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Benchmark definition-to-headword retrieval using words actually present in the 10K pack."""
-import argparse, hashlib, json, pathlib, re, shutil, subprocess, urllib.request, zipfile
+import argparse, hashlib, io, json, pathlib, re, shutil, subprocess, urllib.request, zipfile
 
 MODEL_URL = "https://huggingface.co/ente-ai/embeddinggemma-300m-gguf/resolve/957b55764bd672f51240ac026e3a23ac9459ee3c/embeddinggemma-300M-Q8_0.gguf"
 MODEL_SHA256 = "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63"
@@ -24,7 +24,8 @@ def main():
     if not zpath.exists():
         raise SystemExit(f'Pack ZIP missing: {zpath}')
     upstream = pathlib.Path(args.upstream)
-    pack = upstream / 'target/ensu-dictionary-10k/dictionary-10k-v1'
+    rust_root = upstream / 'rust'
+    pack = rust_root / 'target/ensu-dictionary-10k/dictionary-10k-v1'
     if pack.exists():
         shutil.rmtree(pack)
     pack.mkdir(parents=True)
@@ -41,7 +42,11 @@ def main():
         raise SystemExit(f"Unexpected dataset identity: {manifest.get('dataset')}")
 
     import zstandard as zstd
-    raw = zstd.ZstdDecompressor().decompress((pack / 'meta.zst').read_bytes())
+    # Ensu stores metadata as many concatenated independent Zstandard frames (128 rows each).
+    # A one-shot decompress() reads only the first frame, so stream across every frame.
+    compressed = (pack / 'meta.zst').read_bytes()
+    with zstd.ZstdDecompressor().stream_reader(io.BytesIO(compressed), read_across_frames=True) as reader:
+        raw = reader.read()
     rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
     # Only use passages that really exist in this sampled pack. Remove the headword
     # from the query text so the benchmark tests meaning rather than an exact-word hint.
@@ -109,7 +114,7 @@ fn benchmarks_dictionary_10k_semantic_queries() {
 }
 '''.replace('CASES_JSON', cases_json)
 
-    source = upstream / 'rust/crates/ensu/src/retrieval/index.rs'
+    source = rust_root / 'crates/ensu/src/retrieval/index.rs'
     if not source.exists():
         raise SystemExit(f'Ensu source not found: {source}')
     original = source.read_text()
@@ -120,7 +125,7 @@ fn benchmarks_dictionary_10k_semantic_queries() {
     try:
         command = ['cargo', 'test', '-p', 'ente-ensu', '--lib', '--no-default-features', 'retrieval::index::tests::benchmarks_dictionary_10k_semantic_queries', '--', '--nocapture']
         print('Running definition-to-headword benchmark through Ensu Rust RetrievalIndex...', flush=True)
-        result = subprocess.run(command, cwd=upstream, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        result = subprocess.run(command, cwd=rust_root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         print(result.stdout)
         if result.returncode:
             raise SystemExit(result.returncode)
