@@ -1,0 +1,67 @@
+name: Prepare Ensu semantic pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      entries:
+        description: "Number of evenly sampled dictionary records"
+        required: true
+        type: string
+        default: "1000"
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Restore full dictionary database checkpoint
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/dictionary.sqlite3
+            build/dictionary.sqlite3-wal
+            build/dictionary.sqlite3-shm
+          key: ensu-dictionary-db-full-semantic-pilot-${{ github.run_id }}
+          restore-keys: |
+            ensu-dictionary-db-full-
+
+      - name: Confirm source database is available
+        shell: bash
+        run: |
+          test -s build/dictionary.sqlite3
+          ls -lh build/dictionary.sqlite3
+          python - <<'PY'
+          import sqlite3
+          db = sqlite3.connect("file:build/dictionary.sqlite3?mode=ro", uri=True)
+          state = dict(db.execute("SELECT key, value FROM import_state"))
+          count = db.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+          print(f"English entries: {count:,}")
+          print(f"Import complete: {state.get('complete') == '1'}")
+          if state.get("complete") != "1":
+              raise SystemExit("Full dictionary checkpoint is not complete")
+          db.close()
+          PY
+
+      - name: Prepare semantic pilot passages
+        run: |
+          python scripts/prepare_semantic_pilot.py \
+            --db build/dictionary.sqlite3 \
+            --entries "${{ inputs.entries }}" \
+            --out build/semantic-pilot
+
+      - name: Upload semantic pilot source
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensu-semantic-pilot-source
+          path: |
+            build/semantic-pilot/pilot.jsonl
+            build/semantic-pilot/pilot-report.json
+          if-no-files-found: error
+          retention-days: 14
