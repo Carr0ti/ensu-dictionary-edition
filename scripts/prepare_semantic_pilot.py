@@ -267,10 +267,10 @@ def main() -> None:
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        state = conn.execute(
-            "SELECT complete FROM import_state ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()
-        if not state or state["complete"] != 1:
+        # The canonical importer stores import_state as key/value rows,
+        # not a table with a dedicated `complete` column.
+        state = dict(conn.execute("SELECT key, value FROM import_state"))
+        if state.get("complete") != "1":
             raise SystemExit("Dictionary import is not marked complete.")
 
         total, ids = sample_ids(conn, args.entries)
