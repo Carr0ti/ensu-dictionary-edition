@@ -1,0 +1,94 @@
+name: Test meaning-based search with Ensu Rust
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  semantic-retrieval:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out dictionary project
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install CPU embedding runtime
+        env:
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
+            "llama-cpp-python==0.3.36" "zstandard==0.23.0"
+
+      - name: Download and verify Ensu embedding model
+        run: |
+          mkdir -p build/models
+          curl -L --fail --retry 5 --retry-delay 3 \
+            "https://huggingface.co/ente-ai/embeddinggemma-300m-gguf/resolve/957b55764bd672f51240ac026e3a23ac9459ee3c/embeddinggemma-300M-Q8_0.gguf" \
+            -o build/models/embeddinggemma-300M-Q8_0.gguf
+          echo "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63  build/models/embeddinggemma-300M-Q8_0.gguf" \
+            | sha256sum --check
+
+      - name: Prepare meaning-based query vectors
+        run: |
+          python scripts/prepare_semantic_queries.py \
+            --pilot-zip test-fixtures/dictionary-pilot-v1.zip \
+            --model build/models/embeddinggemma-300M-Q8_0.gguf \
+            --output build/semantic-query-fixtures.json \
+            --threads 4
+
+      - name: Check out Ente source
+        uses: actions/checkout@v4
+        with:
+          repository: ente/ente
+          ref: main
+          path: upstream
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake libvulkan-dev glslc spirv-headers
+
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-workspaces: upstream/rust -> target
+
+      - name: Record Ente source revision
+        working-directory: upstream
+        run: git rev-parse HEAD
+
+      - name: Run actual Ensu Rust semantic retrieval
+        run: |
+          python scripts/test_ensu_semantic_queries.py \
+            --upstream-root upstream \
+            --pilot-zip test-fixtures/dictionary-pilot-v1.zip \
+            --query-fixtures build/semantic-query-fixtures.json \
+            --rust-results build/semantic-rust-results.json
+
+      - name: Evaluate semantic retrieval results
+        run: |
+          python scripts/evaluate_semantic_queries.py \
+            --results build/semantic-rust-results.json \
+            --output build/semantic-retrieval-report.json
+
+      - name: Upload semantic retrieval report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensu-semantic-retrieval-report
+          path: |
+            build/semantic-query-fixtures.json
+            build/semantic-rust-results.json
+            build/semantic-retrieval-report.json
+          if-no-files-found: error
+          retention-days: 14
