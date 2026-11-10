@@ -25,17 +25,31 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Smoke-test and full-build checkpoints use separate cache namespaces.
+      # A new run restores the latest matching cache, then saves its newer state.
+      - name: Restore dictionary checkpoint
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/dictionary.sqlite3
+            build/dictionary.sqlite3-wal
+            build/dictionary.sqlite3-shm
+          key: ensu-dictionary-db-${{ inputs.smoke_test_limit == '' && 'full' || 'smoke' }}-${{ github.run_id }}
+          restore-keys: |
+            ensu-dictionary-db-${{ inputs.smoke_test_limit == '' && 'full' || 'smoke' }}-
+
       - name: Run importer tests
         run: python -m unittest discover -s tests -v
 
-      - name: Build SQLite database
+      - name: Build or resume SQLite database
         shell: bash
+        env:
+          LIMIT: ${{ inputs.smoke_test_limit }}
         run: |
-          LIMIT="${{ inputs.smoke_test_limit }}"
           if [ -n "$LIMIT" ]; then
-            python scripts/ingest_wiktextract.py --limit "$LIMIT" --output build/dictionary.sqlite3
+            python scripts/ingest_wiktextract.py --resume --limit "$LIMIT" --output build/dictionary.sqlite3
           else
-            python scripts/ingest_wiktextract.py --output build/dictionary.sqlite3
+            python scripts/ingest_wiktextract.py --resume --output build/dictionary.sqlite3
           fi
 
       - name: Report database size and record count
@@ -47,6 +61,9 @@ jobs:
           count = db.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
           print(f"English source records: {count:,}")
           print(f"SQLite size: {os.path.getsize(p):,} bytes")
+          state = dict(db.execute("SELECT key, value FROM import_state"))
+          print(f"Import complete: {state.get('complete') == '1'}")
+          print(f"Source records scanned: {int(state.get('source_records_seen', '0')):,}")
           db.close()
           PY
 
@@ -54,6 +71,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ensu-dictionary-sqlite
-          path: build/dictionary.sqlite3
+          path: |
+            build/dictionary.sqlite3
+            build/dictionary.sqlite3-wal
+            build/dictionary.sqlite3-shm
           if-no-files-found: error
           retention-days: 14
