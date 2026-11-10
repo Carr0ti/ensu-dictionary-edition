@@ -1,3 +1,4 @@
+
 name: Build complete dictionary database
 
 on:
@@ -16,6 +17,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -25,8 +27,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Smoke-test and full-build checkpoints use separate cache namespaces.
-      # A new run restores the latest matching cache, then saves its newer state.
+      # Keep smoke-test and full-build checkpoints separate.
       - name: Restore dictionary checkpoint
         uses: actions/cache@v4
         with:
@@ -47,24 +48,74 @@ jobs:
           LIMIT: ${{ inputs.smoke_test_limit }}
         run: |
           if [ -n "$LIMIT" ]; then
+            echo "MODE: SMOKE TEST"
+            echo "LIMIT: $LIMIT"
             python scripts/ingest_wiktextract.py --resume --limit "$LIMIT" --output build/dictionary.sqlite3
           else
+            echo "MODE: FULL DICTIONARY IMPORT"
+            echo "NO RECORD LIMIT"
             python scripts/ingest_wiktextract.py --resume --output build/dictionary.sqlite3
           fi
 
       - name: Report database size and record count
         run: |
           python - <<'PY'
-          import os, sqlite3
-          p = "build/dictionary.sqlite3"
-          db = sqlite3.connect(p)
-          count = db.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+          import os
+          import sqlite3
+
+          path = "build/dictionary.sqlite3"
+          db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+          count = db.execute(
+              "SELECT COUNT(*) FROM entries"
+          ).fetchone()[0]
+
+          state = dict(db.execute(
+              "SELECT key, value FROM import_state"
+          ))
+
           print(f"English source records: {count:,}")
-          print(f"SQLite size: {os.path.getsize(p):,} bytes")
-          state = dict(db.execute("SELECT key, value FROM import_state"))
+          print(f"SQLite size: {os.path.getsize(path):,} bytes")
           print(f"Import complete: {state.get('complete') == '1'}")
-          print(f"Source records scanned: {int(state.get('source_records_seen', '0')):,}")
+          print(
+              f"Source records scanned: "
+              f"{int(state.get('source_records_seen', '0')):,}"
+          )
+
           db.close()
+          PY
+
+      - name: Verify SQLite database integrity
+        shell: bash
+        run: |
+          python - <<'PY'
+          import sqlite3
+
+          path = "build/dictionary.sqlite3"
+          db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+          result = db.execute("PRAGMA integrity_check").fetchone()[0]
+          print(f"SQLite integrity: {result}")
+
+          count = db.execute(
+              "SELECT COUNT(*) FROM entries"
+          ).fetchone()[0]
+
+          state = dict(db.execute(
+              "SELECT key, value FROM import_state"
+          ))
+
+          print(f"Verified English entries: {count:,}")
+          print(f"Import complete: {state.get('complete') == '1'}")
+
+          db.close()
+
+          if result != "ok":
+              raise SystemExit("Database integrity check FAILED")
+
+          if state.get("complete") != "1":
+              raise SystemExit("Dictionary import is incomplete")
+
           PY
 
       - name: Upload database artifact
