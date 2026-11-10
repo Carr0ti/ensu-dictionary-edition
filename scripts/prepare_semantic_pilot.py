@@ -1,213 +1,336 @@
 #!/usr/bin/env python3
-"""Prepare a deterministic semantic-search pilot from the lossless dictionary DB.
+"""Build a context-preserving Ensu semantic pilot from the canonical SQLite DB.
 
-This stage does NOT embed data or modify the source SQLite database. It exports
-up to N evenly sampled English Wiktextract records as Ensu-shaped passages.
-The complete raw records remain in dictionary.sqlite3.
+The SQLite database is opened read-only. Each passage repeats its headword and
+part of speech, and long content is split only at whitespace boundaries.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
-MAX_CHARS = 600
+DEFAULT_MAX_CHARS = 600
 
 
 def clean(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
-        return " ".join(value.replace("\x00", " ").split())
-    return " ".join(str(value).split())
+        return re.sub(r"\s+", " ", value).strip()
+    return ""
 
 
-def list_of_strings(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
+def strings(value: Any) -> list[str]:
+    """Extract readable strings from Wiktextract's mixed list/object fields."""
+    out: list[str] = []
+    if isinstance(value, str):
+        s = clean(value)
+        if s:
+            out.append(s)
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, str):
+                s = clean(item)
+                if s:
+                    out.append(s)
+            elif isinstance(item, dict):
+                # Wiktextract examples commonly use text; gloss objects use gloss.
+                for key in ("text", "gloss", "raw_gloss", "name", "ipa", "roman"):
+                    s = clean(item.get(key))
+                    if s:
+                        out.append(s)
+                        break
+    elif isinstance(value, dict):
+        for key in ("text", "gloss", "raw_gloss", "name", "ipa", "roman"):
+            s = clean(value.get(key))
+            if s:
+                out.append(s)
+    return out
+
+
+def unique(items: Iterable[str]) -> list[str]:
+    seen = set()
     result = []
-    for item in value:
-        if isinstance(item, str):
-            text = clean(item)
-        elif isinstance(item, dict):
-            text = clean(item.get("text") or item.get("gloss") or item.get("word"))
-        else:
-            text = ""
-        if text and text not in result:
-            result.append(text)
+    for item in items:
+        key = item.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(item)
     return result
 
 
-def split_text(text: str, limit: int = MAX_CHARS) -> list[str]:
-    """Split at whitespace without dropping content."""
-    text = clean(text)
-    if not text:
-        return []
-    parts: list[str] = []
-    while len(text) > limit:
-        cut = text.rfind(" ", 0, limit + 1)
-        if cut < max(1, limit // 2):
-            cut = limit
-        parts.append(text[:cut].strip())
-        text = text[cut:].strip()
-    if text:
-        parts.append(text)
+def field_values(record: dict, key: str) -> list[str]:
+    return unique(strings(record.get(key)))
+
+
+def get_headword(record: dict) -> str:
+    return clean(record.get("word") or record.get("title") or record.get("lemma"))
+
+
+def get_pos(record: dict) -> str:
+    return clean(record.get("pos") or record.get("part_of_speech")) or "unspecified"
+
+
+def get_pronunciations(record: dict) -> list[str]:
+    values = []
+    for sound in record.get("sounds", []) if isinstance(record.get("sounds"), list) else []:
+        if isinstance(sound, dict):
+            ipa = clean(sound.get("ipa"))
+            if ipa:
+                values.append(ipa)
+    return unique(values)
+
+
+def sense_label(sense: dict, index: int) -> str:
+    tags = field_values(sense, "tags")
+    topics = field_values(sense, "topics")
+    labels = unique(tags + topics)
+    prefix = f"sense {index + 1}"
+    if labels:
+        prefix += "; labels: " + ", ".join(labels[:8])
+    return prefix
+
+
+def sense_content(sense: dict) -> list[str]:
+    parts = []
+    glosses = field_values(sense, "glosses")
+    raw_glosses = field_values(sense, "raw_glosses")
+    definitions = unique(glosses + raw_glosses)
+    if definitions:
+        parts.append("Definition: " + "; ".join(definitions))
+
+    examples = []
+    raw_examples = sense.get("examples", [])
+    if isinstance(raw_examples, list):
+        for ex in raw_examples:
+            if isinstance(ex, str):
+                value = clean(ex)
+            elif isinstance(ex, dict):
+                value = clean(ex.get("text") or ex.get("example"))
+                translation = clean(ex.get("translation"))
+                if value and translation:
+                    value += f" (translation: {translation})"
+            else:
+                value = ""
+            if value:
+                examples.append(value)
+    if examples:
+        parts.extend("Example: " + x for x in unique(examples))
+
+    for key, label in (
+        ("synonyms", "Synonyms"),
+        ("antonyms", "Antonyms"),
+        ("related", "Related terms"),
+        ("derived", "Derived terms"),
+        ("holonyms", "Holonyms"),
+        ("meronyms", "Meronyms"),
+        ("translations", "Translations"),
+    ):
+        values = field_values(sense, key)
+        if values:
+            parts.append(label + ": " + "; ".join(values))
+
     return parts
 
 
-def record_passages(record: dict[str, Any]) -> list[dict[str, str]]:
-    word = clean(record.get("word"))
-    pos = clean(record.get("pos")) or "unknown part of speech"
+def split_text(text: str, limit: int) -> list[str]:
+    """Split at whitespace; prefer sentence/semicolon boundaries where possible."""
+    text = clean(text)
+    if len(text) <= limit:
+        return [text] if text else []
+
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[:limit + 1]
+        # Prefer a sentence or clause boundary in the latter 60% of the window.
+        cut = -1
+        floor = int(limit * 0.60)
+        for match in re.finditer(r"[.!?;]\s+", window):
+            if match.end() >= floor:
+                cut = match.end()
+        if cut < 0:
+            # Otherwise split at the last whitespace within the limit.
+            cut = window.rfind(" ", 0, limit + 1)
+        if cut <= 0:
+            # A single unbroken token is exceptionally long; preserve it intact.
+            next_space = remaining.find(" ", limit)
+            if next_space < 0:
+                chunks.append(remaining)
+                remaining = ""
+                break
+            cut = next_space
+        piece = remaining[:cut].strip()
+        if piece:
+            chunks.append(piece)
+        remaining = remaining[cut:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def make_passages(record: dict, max_chars: int) -> list[dict]:
+    word = get_headword(record)
     if not word:
         return []
+    pos = get_pos(record)
+    pronunciations = get_pronunciations(record)
+    prefix = f"Headword: {word}. Part of speech: {pos}."
+    if pronunciations:
+        prefix += " Pronunciation: " + ", ".join(pronunciations[:6]) + "."
 
-    sounds = record.get("sounds") if isinstance(record.get("sounds"), list) else []
-    ipa = []
-    for sound in sounds:
-        if isinstance(sound, dict):
-            value = clean(sound.get("ipa"))
-            if value and value not in ipa:
-                ipa.append(value)
-    pronunciation = f"Pronunciation: {', '.join(ipa[:4])}. " if ipa else ""
-
-    senses = record.get("senses")
+    senses = record.get("senses", [])
     if not isinstance(senses, list) or not senses:
-        senses = [{"glosses": list_of_strings(record.get("glosses"))}]
+        senses = [{}]
 
-    rows: list[dict[str, str]] = []
-    for sense_no, sense in enumerate(senses, 1):
+    passages = []
+    for index, sense in enumerate(senses):
         if not isinstance(sense, dict):
             continue
-        glosses = list_of_strings(sense.get("glosses"))
-        if not glosses:
-            glosses = list_of_strings(sense.get("raw_glosses"))
-        tags = list_of_strings(sense.get("tags"))
-        topics = list_of_strings(sense.get("topics"))
-        examples = sense.get("examples") if isinstance(sense.get("examples"), list) else []
+        label = sense_label(sense, index)
+        content_parts = sense_content(sense)
+        if not content_parts:
+            continue
 
-        sections = [
-            f"Headword: {word}.",
-            f"Part of speech: {pos}.",
-        ]
-        if pronunciation:
-            sections.append(pronunciation.strip())
-        if tags:
-            sections.append("Labels: " + ", ".join(tags) + ".")
-        if topics:
-            sections.append("Topics: " + ", ".join(topics) + ".")
-        if glosses:
-            sections.append("Definition: " + "; ".join(glosses))
+        # Keep each semantic unit whole when possible. Long units are split
+        # into whitespace-safe fragments, with context repeated in every chunk.
+        context = prefix + " " + label + ". "
+        budget = max(80, max_chars - len(context))
+        units = []
+        for part in content_parts:
+            units.extend(split_text(part, budget))
 
-        for example in examples:
-            if not isinstance(example, dict):
-                continue
-            example_text = clean(example.get("text"))
-            translation = clean(example.get("translation"))
-            if example_text:
-                line = "Example: " + example_text
-                if translation:
-                    line += " (translation: " + translation + ")"
-                sections.append(line + ".")
+        current = []
+        current_len = 0
+        for unit in units:
+            addition = len(unit) + (1 if current else 0)
+            if current and current_len + addition > budget:
+                text = context + " ".join(current)
+                passages.append({
+                    "title": word,
+                    "text": text,
+                    "section": f"{pos}; {label}; passage {len(passages) + 1}",
+                })
+                current = []
+                current_len = 0
+            current.append(unit)
+            current_len += len(unit) + (1 if len(current) > 1 else 0)
 
-        full = " ".join(part for part in sections if part)
-        chunks = split_text(full)
-        for chunk_no, chunk in enumerate(chunks, 1):
-            rows.append({
+        if current:
+            text = context + " ".join(current)
+            passages.append({
                 "title": word,
-                "text": chunk,
-                "section": f"{pos}; sense {sense_no}; passage {chunk_no}",
+                "text": text,
+                "section": f"{pos}; {label}; passage {len(passages) + 1}",
             })
 
-    return rows
+    return passages
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", default="build/dictionary.sqlite3")
+def sample_ids(conn: sqlite3.Connection, count: int) -> list[int]:
+    total = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+    if total == 0:
+        return []
+    count = min(count, total)
+    # Stable, evenly distributed sample across the complete import.
+    ids = []
+    for i in range(count):
+        offset = (i * (total - 1)) // max(1, count - 1) if count > 1 else total // 2
+        row = conn.execute(
+            "SELECT id FROM entries ORDER BY id LIMIT 1 OFFSET ?", (offset,)
+        ).fetchone()
+        if row:
+            ids.append(row[0])
+    return total, ids
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--database", default="build/dictionary.sqlite3")
     parser.add_argument("--entries", type=int, default=1000)
-    parser.add_argument("--out", default="build/semantic-pilot")
+    parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    parser.add_argument("--output-dir", default="build/semantic-pilot")
     args = parser.parse_args()
 
-    if args.entries < 1:
-        parser.error("--entries must be positive")
-
-    db_path = Path(args.db)
+    db_path = Path(args.database).resolve()
     if not db_path.is_file():
         raise SystemExit(f"Database not found: {db_path}")
+    if args.entries < 1 or args.max_chars < 200:
+        raise SystemExit("--entries must be positive and --max-chars must be at least 200")
 
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    jsonl_path = out_dir / "pilot.jsonl"
-    report_path = out_dir / "pilot-report.json"
+    uri = f"file:{db_path.as_posix()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        state = conn.execute(
+            "SELECT complete FROM import_state ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if not state or state["complete"] != 1:
+            raise SystemExit("Dictionary import is not marked complete.")
 
-    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    db.execute("PRAGMA query_only=ON")
-    total = db.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
-    if total == 0:
-        raise SystemExit("The dictionary database has no entries")
+        total, ids = sample_ids(conn, args.entries)
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_path = output_dir / "pilot.jsonl"
 
-    # Deterministic, evenly spaced IDs avoid a slow ORDER BY RANDOM() over
-    # the 1.5-million-row source table and avoid sampling only A-words.
-    sample_count = min(args.entries, total)
-    ids = sorted({
-        max(1, min(total, 1 + (i * (total - 1) // max(1, sample_count - 1))))
-        for i in range(sample_count)
-    })
+        entries_with_passages = 0
+        entries_without_passages = 0
+        passage_count = 0
+        max_observed = 0
 
-    written_entries = 0
-    written_passages = 0
-    empty_records = 0
-    with jsonl_path.open("w", encoding="utf-8", newline="\n") as handle:
-        for entry_id in ids:
-            row = db.execute(
-                "SELECT raw_json FROM entries WHERE id = ?", (entry_id,)
-            ).fetchone()
-            if row is None:
-                continue
-            try:
-                record = json.loads(row[0])
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, dict):
-                continue
-            passages = record_passages(record)
-            if not passages:
-                empty_records += 1
-                continue
-            written_entries += 1
-            for passage in passages:
-                handle.write(json.dumps(
-                    passage, ensure_ascii=False, separators=(",", ":")
-                ) + "\n")
-                written_passages += 1
+        with jsonl_path.open("w", encoding="utf-8", newline="\n") as out:
+            for entry_id in ids:
+                row = conn.execute(
+                    "SELECT raw_json FROM entries WHERE id = ?", (entry_id,)
+                ).fetchone()
+                if not row:
+                    entries_without_passages += 1
+                    continue
+                try:
+                    record = json.loads(row["raw_json"])
+                except (TypeError, json.JSONDecodeError):
+                    entries_without_passages += 1
+                    continue
 
-    db.close()
+                passages = make_passages(record, args.max_chars)
+                if passages:
+                    entries_with_passages += 1
+                else:
+                    entries_without_passages += 1
+                for passage in passages:
+                    max_observed = max(max_observed, len(passage["text"]))
+                    out.write(json.dumps(passage, ensure_ascii=False) + "\n")
+                    passage_count += 1
 
-    report = {
-        "source_database": str(db_path),
-        "source_english_entries": total,
-        "requested_sample_entries": args.entries,
-        "sampled_ids": len(ids),
-        "entries_with_passages": written_entries,
-        "entries_without_passages": empty_records,
-        "semantic_passages": written_passages,
-        "max_chars": MAX_CHARS,
-        "output_jsonl": str(jsonl_path),
-        "source_database_modified": False,
-        "note": "Full raw Wiktextract records remain in the original SQLite database."
-    }
-    report_path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8"
-    )
-    print(json.dumps(report, ensure_ascii=False, indent=2))
-
-    if written_entries == 0 or written_passages == 0:
-        raise SystemExit("Pilot export produced no usable passages")
-    return 0
+        report = {
+            "source_database": str(args.database),
+            "source_english_entries": total,
+            "requested_sample_entries": args.entries,
+            "sampled_ids": len(ids),
+            "entries_with_passages": entries_with_passages,
+            "entries_without_passages": entries_without_passages,
+            "semantic_passages": passage_count,
+            "max_chars": args.max_chars,
+            "max_observed_passage_chars": max_observed,
+            "all_passages_repeat_headword_and_pos": True,
+            "splitting": "sentence_or_whitespace_boundaries",
+            "output_jsonl": str(jsonl_path),
+            "source_database_modified": False,
+            "note": "Full raw Wiktextract records remain in the original SQLite database.",
+        }
+        (output_dir / "pilot-report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
