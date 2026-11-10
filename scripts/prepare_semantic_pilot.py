@@ -251,10 +251,10 @@ def sample_ids(conn: sqlite3.Connection, count: int) -> list[int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--database", default="build/dictionary.sqlite3")
+    parser.add_argument("--database", "--db", dest="database", default="build/dictionary.sqlite3")
     parser.add_argument("--entries", type=int, default=1000)
     parser.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
-    parser.add_argument("--output-dir", default="build/semantic-pilot")
+    parser.add_argument("--output-dir", "--out", dest="output_dir", default="build/semantic-pilot")
     args = parser.parse_args()
 
     db_path = Path(args.database).resolve()
