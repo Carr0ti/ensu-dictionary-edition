@@ -126,16 +126,20 @@ def main():
 
         seen.add(key)
 
-        clean = re.sub(
-            re.escape(title),
-            " ",
-            body,
-            flags=re.IGNORECASE,
+        # FIX 1: Remove the complete headword/phrase only.
+        pattern = re.compile(
+            r"(?<!\w)" + re.escape(title) + r"(?!\w)",
+            flags=re.IGNORECASE | re.UNICODE,
         )
 
-        clean = re.sub(r"\s+", " ", clean).strip(
-            " |;,:.-"
-        )
+        clean = pattern.sub(" ", body)
+        clean = re.sub(r"\s+", " ", clean).strip(" |;,:.-")
+
+        # Verify that the complete headword was removed.
+        if pattern.search(clean):
+            raise SystemExit(
+                f"Headword-removal check failed for {title!r}"
+            )
 
         if len(clean) < 45:
             continue
@@ -270,19 +274,15 @@ fn benchmarks_dictionary_10k_semantic_queries() {
             .search(&vector, 5, 0.0)
             .expect("search query");
 
-        let debug: Vec<String> = hits
-            .iter()
-            .map(|h| format!("{:?}", h).to_lowercase())
-            .collect();
-
-        let one = debug
+        // FIX 2: Compare actual result titles, not Debug output.
+        let one = hits
             .first()
-            .map(|s| s.contains(&expected))
+            .map(|hit| hit.title.to_lowercase() == expected)
             .unwrap_or(false);
 
-        let five = debug
+        let five = hits
             .iter()
-            .any(|s| s.contains(&expected));
+            .any(|hit| hit.title.to_lowercase() == expected);
 
         if one {
             top1 += 1;
@@ -398,8 +398,8 @@ fn benchmarks_dictionary_10k_semantic_queries() {
             "dataset": "dictionary-10k-v1",
             "benchmark_type": (
                 "definition-to-headword retrieval; "
-                "queries derived from passage definitions "
-                "with headwords removed"
+                "queries derived from passage definitions; "
+                "whole-headword removal verified; exact hit.title matching"
             ),
             "cases": total,
             "top1_correct": top1,
