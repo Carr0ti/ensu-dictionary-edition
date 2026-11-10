@@ -1,0 +1,105 @@
+name: Build Ensu semantic pack pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      entries:
+        description: "Entries to prepare from the full SQLite dictionary"
+        required: true
+        default: "1000"
+      passages:
+        description: "Small number of passages to embed (keep at 32 for this test)"
+        required: true
+        default: "32"
+
+permissions:
+  contents: read
+
+jobs:
+  build-pilot:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v4
+
+      - name: Restore completed full dictionary database
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/dictionary.sqlite3
+            build/dictionary.sqlite3-wal
+            build/dictionary.sqlite3-shm
+          key: ensu-dictionary-db-full-semantic-pack-${{ github.run_id }}
+          restore-keys: |
+            ensu-dictionary-db-full-
+
+      - name: Verify full database checkpoint
+        run: |
+          test -s build/dictionary.sqlite3
+          python - <<'PY'
+          import sqlite3
+          db = sqlite3.connect("file:build/dictionary.sqlite3?mode=ro", uri=True)
+          rows = db.execute("SELECT key, value FROM import_state").fetchall()
+          state = dict(rows)
+          count = db.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+          print("entries:", count)
+          print("import complete:", state.get("complete"))
+          assert state.get("complete") == "1"
+          assert count > 1_000_000
+          db.close()
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Prepare semantic pilot passages
+        run: |
+          python scripts/prepare_semantic_pilot.py \
+            --db build/dictionary.sqlite3 \
+            --entries "${{ inputs.entries }}" \
+            --out build/semantic-pilot \
+            --max-chars 600
+
+      - name: Install CPU embedding runtime
+        env:
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
+            "llama-cpp-python==0.3.16" "zstandard==0.23.0"
+
+      - name: Download and verify Ensu embedding model
+        run: |
+          mkdir -p build/models
+          curl -L --fail --retry 5 --retry-delay 3 \
+            "https://huggingface.co/ente-ai/embeddinggemma-300m-gguf/resolve/957b55764bd672f51240ac026e3a23ac9459ee3c/embeddinggemma-300M-Q8_0.gguf" \
+            -o build/models/embeddinggemma-300M-Q8_0.gguf
+          echo "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63  build/models/embeddinggemma-300M-Q8_0.gguf" \
+            | sha256sum --check
+
+      - name: Build and validate tiny Ensu pack
+        run: |
+          python scripts/build_ensu_pack_pilot.py \
+            --input-jsonl build/semantic-pilot/pilot.jsonl \
+            --model build/models/embeddinggemma-300M-Q8_0.gguf \
+            --output build/semantic-pack/dictionary/dictionary-pilot-v1 \
+            --passages "${{ inputs.passages }}" \
+            --threads 4
+
+      - name: Upload four-file pack and report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensu-dictionary-pack-pilot
+          path: |
+            build/semantic-pack/dictionary/dictionary-pilot-v1/manifest.json
+            build/semantic-pack/dictionary/dictionary-pilot-v1/vectors.i8
+            build/semantic-pack/dictionary/dictionary-pilot-v1/meta.zst
+            build/semantic-pack/dictionary/dictionary-pilot-v1/meta.offsets
+            build/semantic-pack/dictionary/dictionary-pilot-v1/pilot-pack-report.json
+          if-no-files-found: error
+          retention-days: 14
