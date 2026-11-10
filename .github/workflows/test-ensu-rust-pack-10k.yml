@@ -1,0 +1,43 @@
+name: Test 10K semantic pack with Ensu Rust
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-reader-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out dictionary project
+        uses: actions/checkout@v4
+
+      - name: Check out Ente source
+        uses: actions/checkout@v4
+        with:
+          repository: ente/ente
+          ref: main
+          path: upstream
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake libvulkan-dev glslc spirv-headers
+
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-workspaces: upstream/rust -> target
+
+      - name: Record Ente source revision
+        working-directory: upstream
+        run: git rev-parse HEAD
+
+      - name: Run actual Ensu Rust reader against 10K pack
+        run: |
+          python scripts/test_ensu_rust_pack_10k.py \
+            --upstream-root upstream \
+            --pack-zip test-fixtures/dictionary-10k-v1.zip
