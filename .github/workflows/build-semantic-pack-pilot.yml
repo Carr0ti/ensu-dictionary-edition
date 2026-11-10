@@ -87,7 +87,7 @@ jobs:
           python scripts/build_ensu_pack_pilot.py \
             --input-jsonl build/semantic-pilot/pilot.jsonl \
             --model build/models/embeddinggemma-300M-Q8_0.gguf \
-            --output build/semantic-pack/dictionary/dictionary-pilot-v1 \
+            --output build/semantic-pack/simplewiki/dictionary-pilot-v1 \
             --passages "${{ inputs.passages }}" \
             --threads 4
 
@@ -96,10 +96,10 @@ jobs:
         with:
           name: ensu-dictionary-pack-pilot
           path: |
-            build/semantic-pack/dictionary/dictionary-pilot-v1/manifest.json
-            build/semantic-pack/dictionary/dictionary-pilot-v1/vectors.i8
-            build/semantic-pack/dictionary/dictionary-pilot-v1/meta.zst
-            build/semantic-pack/dictionary/dictionary-pilot-v1/meta.offsets
-            build/semantic-pack/dictionary/dictionary-pilot-v1/pilot-pack-report.json
+            build/semantic-pack/simplewiki/dictionary-pilot-v1/manifest.json
+            build/semantic-pack/simplewiki/dictionary-pilot-v1/vectors.i8
+            build/semantic-pack/simplewiki/dictionary-pilot-v1/meta.zst
+            build/semantic-pack/simplewiki/dictionary-pilot-v1/meta.offsets
+            build/semantic-pack/simplewiki/dictionary-pilot-v1/pilot-pack-report.json
           if-no-files-found: error
           retention-days: 14
