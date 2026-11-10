@@ -45,7 +45,7 @@ def is_english(record: dict[str, Any]) -> bool:
     """Accept records explicitly marked English by Wiktextract."""
     lang_code = str(record.get("lang_code") or "").strip().lower()
     lang = str(record.get("lang") or "").strip().lower()
-    return lang_code == "en" or lang in {"english", "translingual"}
+    return lang_code == "en" or lang == "english"
 
 def normalized(word: str) -> str:
     return " ".join(word.casefold().split())
