@@ -33,8 +33,8 @@ MAX_CHARS = 600
 DOC_PROMPT = "title: {title} | text: {text}"
 QUERY_PROMPT = "task: search result | query: {query}"
 REVISION = "dictionary-pilot-v1"
-STABLE_ID = "dictionary"
-URL_TEMPLATE = "https://en.wiktionary.org/wiki/{title}"
+STABLE_ID = "simplewiki"
+URL_TEMPLATE = "https://simple.wikipedia.org/wiki/{title}"  # temporary reader-contract fixture
 
 
 def sha256_file(path: Path) -> str:
@@ -62,7 +62,11 @@ def read_passages(path: Path, wanted: int) -> list[dict[str, str]]:
         if key in seen:
             continue
         seen.add(key)
-        rows.append({"title": title, "text": text})
+        section = str(item.get("section", "")).strip()
+        row = {"title": title, "text": text}
+        if section:
+            row["section"] = section
+        rows.append(row)
     if not rows:
         raise ValueError("No usable semantic passages found")
     # Evenly sample distinct headwords across the prepared pilot, rather than
@@ -153,7 +157,7 @@ def write_pack(rows: list[dict[str, str]], vectors: list[bytes], out_dir: Path) 
         for start in range(0, len(rows), ROWS_PER_BLOCK):
             block = rows[start:start + ROWS_PER_BLOCK]
             payload = "".join(
-                json.dumps({"title": row["title"], "text": row["text"]},
+                json.dumps({**{"title": row["title"], "text": row["text"]}, **({"section": row["section"]} if row.get("section") else {})},
                            ensure_ascii=False, separators=(",", ":")) + "\n"
                 for row in block
             ).encode("utf-8")
@@ -238,8 +242,14 @@ def validate_pack(pack_dir: Path) -> dict[str, Any]:
                 raise ValueError(f"Metadata block {block} row count mismatch")
             for line in lines:
                 row = json.loads(line)
-                if not row.get("title", "").strip() or not row.get("text", "").strip():
-                    raise ValueError("Metadata row has an empty title or text")
+                if set(row) - {"title", "text", "section"}:
+                    raise ValueError(f"Metadata row has unsupported fields: {sorted(set(row) - {'title', 'text', 'section'})}")
+                if not isinstance(row.get("title"), str) or not row["title"].strip():
+                    raise ValueError("Metadata row has an empty or non-string title")
+                if not isinstance(row.get("text"), str) or not row["text"].strip():
+                    raise ValueError("Metadata row has an empty or non-string text")
+                if "section" in row and (not isinstance(row["section"], str) or not row["section"].strip()):
+                    raise ValueError("Metadata section must be a non-empty string when present")
                 if len(row["text"]) > MAX_CHARS:
                     raise ValueError("Metadata passage exceeds max_chars")
                 metadata_rows.append(row)
@@ -264,6 +274,8 @@ def validate_pack(pack_dir: Path) -> dict[str, Any]:
         "max_quantized_vector_norm": max(norms),
         "max_passage_chars": max(len(row["text"]) for row in metadata_rows),
         "titles": [row["title"] for row in metadata_rows],
+        "metadata_fields_validated": True,
+        "metadata_schema": "{title: string, text: string, section?: string}",
     }
 
 
