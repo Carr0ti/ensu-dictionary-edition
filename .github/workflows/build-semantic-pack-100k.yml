@@ -1,20 +1,22 @@
+
 name: Build Ensu 100K semantic pack
 
 on:
   workflow_dispatch:
     inputs:
       entries:
-        description: "Dictionary records to prepare (125,000 gives headroom for 100,000 usable headwords)"
+        description: "Dictionary records to prepare"
         required: true
         type: string
         default: "125000"
       passages:
-        description: "Number of distinct headword passages to embed"
+        description: "Number of distinct headword passages"
         required: true
         type: string
         default: "100000"
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -25,16 +27,14 @@ jobs:
       - name: Check out selected branch
         uses: actions/checkout@v4
 
-      - name: Restore completed full dictionary database
-        uses: actions/cache/restore@v4
+      - name: Download completed full dictionary database
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            build/dictionary.sqlite3
-            build/dictionary.sqlite3-wal
-            build/dictionary.sqlite3-shm
-          key: ensu-dictionary-db-full-semantic-100k-${{ github.run_id }}
-          restore-keys: |
-            ensu-dictionary-db-full-
+          name: ensu-dictionary-sqlite
+          run-id: 42821286934
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          path: build
 
       - name: Verify full database checkpoint
         run: |
