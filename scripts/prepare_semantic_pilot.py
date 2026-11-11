@@ -232,20 +232,32 @@ def make_passages(record: dict, max_chars: int) -> list[dict]:
     return passages
 
 
-def sample_ids(conn: sqlite3.Connection, count: int) -> list[int]:
+def sample_ids(conn: sqlite3.Connection, count: int) -> tuple[int, list[int]]:
+    """Select evenly spaced IDs in one ordered scan, avoiding repeated OFFSET queries."""
     total = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+
     if total == 0:
-        return []
+        return total, []
+
     count = min(count, total)
-    # Stable, evenly distributed sample across the complete import.
+
+    if count == 1:
+        targets = {total // 2}
+    else:
+        targets = {
+            (i * (total - 1)) // (count - 1)
+            for i in range(count)
+        }
+
     ids = []
-    for i in range(count):
-        offset = (i * (total - 1)) // max(1, count - 1) if count > 1 else total // 2
-        row = conn.execute(
-            "SELECT id FROM entries ORDER BY id LIMIT 1 OFFSET ?", (offset,)
-        ).fetchone()
-        if row:
+    for position, row in enumerate(
+        conn.execute("SELECT id FROM entries ORDER BY id")
+    ):
+        if position in targets:
             ids.append(row[0])
+            if len(ids) == len(targets):
+                break
+
     return total, ids
 
 
