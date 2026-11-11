@@ -1,0 +1,105 @@
+name: Build Ensu 100K semantic pack
+
+on:
+  workflow_dispatch:
+    inputs:
+      entries:
+        description: "Dictionary records to prepare (125,000 gives headroom for 100,000 usable headwords)"
+        required: true
+        type: string
+        default: "125000"
+      passages:
+        description: "Number of distinct headword passages to embed"
+        required: true
+        type: string
+        default: "100000"
+
+permissions:
+  contents: read
+
+jobs:
+  build-100k:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - name: Check out selected branch
+        uses: actions/checkout@v4
+
+      - name: Restore completed full dictionary database
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/dictionary.sqlite3
+            build/dictionary.sqlite3-wal
+            build/dictionary.sqlite3-shm
+          key: ensu-dictionary-db-full-semantic-100k-${{ github.run_id }}
+          restore-keys: |
+            ensu-dictionary-db-full-
+
+      - name: Verify full database checkpoint
+        run: |
+          test -s build/dictionary.sqlite3
+          python - <<'PY'
+          import sqlite3
+          db = sqlite3.connect("file:build/dictionary.sqlite3?mode=ro", uri=True)
+          state = dict(db.execute("SELECT key, value FROM import_state"))
+          count = db.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+          print(f"English entries: {count:,}")
+          print(f"Import complete: {state.get('complete') == '1'}")
+          assert state.get('complete') == "1" and count > 1_000_000
+          db.close()
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Prepare 125,000 source entries
+        run: |
+          python scripts/prepare_semantic_pilot.py \
+            --db build/dictionary.sqlite3 \
+            --entries "${{ inputs.entries }}" \
+            --out build/semantic-100k \
+            --max-chars 600
+
+      - name: Install CPU embedding runtime
+        env:
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
+            "llama-cpp-python==0.3.36" "zstandard==0.23.0"
+
+      - name: Download and verify pinned EmbeddingGemma model
+        run: |
+          mkdir -p build/models
+          curl -L --fail --retry 5 --retry-delay 3 \
+            "https://huggingface.co/ente-ai/embeddinggemma-300m-gguf/resolve/957b55764bd672f51240ac026e3a23ac9459ee3c/embeddinggemma-300M-Q8_0.gguf" \
+            -o build/models/embeddinggemma-300M-Q8_0.gguf
+          echo "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63  build/models/embeddinggemma-300M-Q8_0.gguf" | sha256sum --check
+
+      - name: Build and validate 100,000-passage Ensu pack
+        run: |
+          python scripts/build_ensu_pack_100k.py \
+            --input-jsonl build/semantic-100k/pilot.jsonl \
+            --model build/models/embeddinggemma-300M-Q8_0.gguf \
+            --output build/semantic-pack/dictionary/dictionary-100k-v1 \
+            --passages "${{ inputs.passages }}" \
+            --threads 4
+
+      - name: Upload 100K pack and validation reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensu-dictionary-pack-100k
+          path: |
+            build/semantic-pack/dictionary/dictionary-100k-v1/manifest.json
+            build/semantic-pack/dictionary/dictionary-100k-v1/vectors.i8
+            build/semantic-pack/dictionary/dictionary-100k-v1/meta.zst
+            build/semantic-pack/dictionary/dictionary-100k-v1/meta.offsets
+            build/semantic-pack/dictionary/dictionary-100k-v1/pack-report.json
+            build/semantic-100k/pilot-report.json
+          if-no-files-found: error
+          retention-days: 14
