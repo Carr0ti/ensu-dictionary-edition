@@ -1,3 +1,4 @@
+
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import java.io.File
@@ -15,8 +16,7 @@ val releaseJniLibsDir = layout.buildDirectory.dir("generated/jniLibs/release")
 
 fun capture(vararg cmd: String): String? = runCatching {
     providers.exec { commandLine(*cmd) }.standardOutput.asText.get().trim()
-}
-    .getOrNull()
+}.getOrNull()
 
 fun connectedDeviceAbi(): String? {
     val sdkRoot = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
@@ -140,10 +140,9 @@ fun registerBuildRustJni(
             val version = android.ndkVersion
             val ndkDir = runCatching {
                 android.ndkDirectory
+            }.getOrElse {
+                error("NDK $version is not installed. Run: sdkmanager \"ndk;$version\"")
             }
-                .getOrElse {
-                    error("NDK $version is not installed. Run: sdkmanager \"ndk;$version\"")
-                }
             val toolchain = ndkToolchain(ndkDir)
 
             val outDir = outputDir.get().asFile
@@ -190,7 +189,8 @@ val buildRustJniDebug =
     registerBuildRustJni(
         taskName = "buildRustJniDebug",
         outputDir = debugJniLibsDir,
-        resolveAbis = { listOf(connectedDeviceAbi() ?: hostAbi()) },
+        // CI debug APK must target the Redmi-compatible ARM64 architecture.
+        resolveAbis = { listOf("arm64-v8a") },
     )
 
 val buildRustJniRelease =
@@ -203,9 +203,6 @@ val buildRustJniRelease =
 android {
     namespace = "io.ente.ensu.rust"
     compileSdk = 36
-    // Pin the NDK instead of relying on AGP defaults. GitHub-hosted Ubuntu
-    // runners already ship 27.3.13750724, so this keeps CI lean while making
-    // the requirement explicit for local builds too.
     ndkVersion = "27.3.13750724"
 
     defaultConfig { minSdk = 24 }
@@ -222,14 +219,10 @@ android {
 kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
 
 tasks.matching { it.name == "preDebugBuild" }.configureEach { dependsOn(buildRustJniDebug) }
-
 tasks.matching { it.name == "preReleaseBuild" }.configureEach { dependsOn(buildRustJniRelease) }
 
 dependencies {
     api("androidx.annotation:annotation:1.7.1")
-    // Custom WebGPU/XNNPACK build; the Rust runtime dynamically loads its
-    // libonnxruntime.so. Resolved from the Ivy repository declared in
-    // settings.gradle.kts and SHA-256 pinned in android/gradle/verification-metadata.xml.
     api("io.ente.onnxruntime:onnxruntime-webgpu-android:1.31.0-r1@aar")
     api("net.java.dev.jna:jna:5.18.1@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.0")
