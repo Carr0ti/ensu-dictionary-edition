@@ -1,3 +1,4 @@
+
 pub(crate) const KNOWLEDGE_LICENSE_LABEL: &str = "CC BY-SA 4.0";
 pub(crate) const KNOWLEDGE_LICENSE_URL: &str = "https://creativecommons.org/licenses/by-sa/4.0/";
 
@@ -188,6 +189,30 @@ pub(crate) fn knowledge_datasets() -> Vec<KnowledgeDatasetConfig> {
                 license_url: KNOWLEDGE_LICENSE_URL.to_owned(),
                 public_pack_url: "https://huggingface.co/datasets/ente-ai/ensu-knowledge-packs/tree/1a24af36cb29b41326d24fd8486e12388a2f55e5/fullwiki".to_owned(),
                 modification_notice: MODIFICATION_NOTICE.to_owned(),
+            },
+        },
+        KnowledgeDatasetConfig {
+            stable_id: "ensu-dictionary".to_owned(),
+            label: "Ensu English Dictionary".to_owned(),
+            current_download_identity: "dictionary-100k-v1".to_owned(),
+            artifact_base_url: "https://github.com/Carr0ti/ensu-dictionary-edition/releases/download/dictionary-100k-v1/".to_owned(),
+            artifact_sizes: vec![759, 51_200_000, 6_069_487, 6_264],
+            artifact_sha256: vec![
+                "c70de7714153d5005617ce910f6dfcab86681b8b34a8f5ddc8ec736fb278fe60".to_owned(),
+                "3879720fd8456bb38697a97b15dbd9aab3cc3f0e8e6513a13320736b4e7f79a8".to_owned(),
+                "e524528b2eb81db5f3a95850c1502dcbb52787e9f6326cb4b344d4beb79494d3".to_owned(),
+                "6cfa8d58ad41274082cc5d2e55308c59881adc97a407335d9d37ca2b85c714e6".to_owned(),
+            ],
+            download_size_bytes: 57_276_510,
+            max_chars: 600,
+            source_url_template: "https://en.wiktionary.org/wiki/{title}".to_owned(),
+            relevance_threshold: 0.55,
+            attribution: AttributionConfig {
+                credit: "Wiktionary contributors; processed using Wiktextract".to_owned(),
+                license_label: KNOWLEDGE_LICENSE_LABEL.to_owned(),
+                license_url: KNOWLEDGE_LICENSE_URL.to_owned(),
+                public_pack_url: "https://github.com/Carr0ti/ensu-dictionary-edition/releases/tag/dictionary-100k-v1".to_owned(),
+                modification_notice: "Adapted for Ensu Dictionary Edition using Wiktextract".to_owned(),
             },
         },
     ]
