@@ -1,0 +1,73 @@
+
+name: Publish Ensu dictionary 100K release
+
+on:
+  push:
+    branches:
+      - dictionary-edition-dev
+    paths:
+      - .github/workflows/publish-dictionary-100k-release.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out dictionary development branch
+        uses: actions/checkout@v4
+        with:
+          ref: dictionary-edition-dev
+
+      - name: Download validated 100K pack artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ensu-dictionary-pack-100k
+          run-id: 43030962227
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          path: release-input
+
+      - name: Verify and stage the four Ensu pack files
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST="$(find release-input -type f -name manifest.json -print -quit)"
+          test -n "$MANIFEST"
+          PACK_DIR="$(dirname "$MANIFEST")"
+          mkdir -p release-assets
+          for file in manifest.json vectors.i8 meta.zst meta.offsets; do
+            test -s "$PACK_DIR/$file"
+            cp "$PACK_DIR/$file" "release-assets/$file"
+          done
+          ls -lh release-assets
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 4
+
+      - name: Publish or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="dictionary-100k-v1"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              release-assets/manifest.json \
+              release-assets/vectors.i8 \
+              release-assets/meta.zst \
+              release-assets/meta.offsets \
+              --clobber
+          else
+            gh release create "$TAG" \
+              release-assets/manifest.json \
+              release-assets/vectors.i8 \
+              release-assets/meta.zst \
+              release-assets/meta.offsets \
+              --target dictionary-edition-dev \
+              --title "Ensu Dictionary Semantic Pack 100K v1" \
+              --notes "Validated 100,000-passage Ensu semantic retrieval pack. Built from Wiktionary data processed with Wiktextract. Wiktionary contributions are available under applicable CC BY-SA and GFDL terms. This release contains the four files required by Ensu."
+          fi
+          gh release view "$TAG" --json url,tagName,assets
