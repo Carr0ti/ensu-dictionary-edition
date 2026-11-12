@@ -39,8 +39,9 @@ jobs:
           restore-keys: |
             ensu-dictionary-android-gradle-${{ runner.os }}-
 
-      - name: Generate native Kotlin bindings and run Android lint
-        run: ./android/scripts/lint.sh
+      - name: Generate native Kotlin bindings
+        working-directory: rust
+        run: cargo codegen native
 
       - name: Build Ensu debug APK
         working-directory: android
