@@ -1,0 +1,55 @@
+name: Test 100K pack with Ensu Rust
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  rust-reader-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out dictionary project
+        uses: actions/checkout@v4
+
+      - name: Check out Ente source
+        uses: actions/checkout@v4
+        with:
+          repository: ente/ente
+          ref: main
+          path: upstream
+
+      - name: Download completed 100K pack
+        uses: actions/download-artifact@v4
+        with:
+          name: ensu-dictionary-pack-100k
+          run-id: 43030962227
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          path: build/pack-artifact
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake libvulkan-dev glslc spirv-headers
+
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-workspaces: upstream/rust -> target
+
+      - name: Record Ente source revision
+        working-directory: upstream
+        run: git rev-parse HEAD
+
+      - name: Test 100K pack with actual Ensu Rust reader
+        run: |
+          python scripts/test_ensu_rust_pack_100k.py \
+            --upstream-root upstream \
+            --pack-dir build/pack-artifact/semantic-pack/dictionary/dictionary-100k-v1
