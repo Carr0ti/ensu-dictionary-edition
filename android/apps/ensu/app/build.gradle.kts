@@ -1,3 +1,4 @@
+
 import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
@@ -8,7 +9,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-configurations.configureEach { exclude(group = "com.google.guava", module = "listenablefuture") }
+configurations.configureEach {
+    exclude(group = "com.google.guava", module = "listenablefuture")
+}
 
 val keystorePropsFile = file("../key.properties")
 val keystoreProps = Properties()
@@ -17,42 +20,6 @@ val hasReleaseKeystore = keystorePropsFile.exists()
 if (hasReleaseKeystore) {
     keystorePropsFile.inputStream().use { keystoreProps.load(it) }
 }
-
-val knownAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-
-fun capture(vararg cmd: String): String? = runCatching {
-    providers.exec { commandLine(*cmd) }.standardOutput.asText.get().trim()
-}
-    .getOrNull()
-
-fun connectedDeviceAbi(): String? {
-    val sdkRoot = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
-    val adb = sdkRoot?.let { "$it/platform-tools/adb" } ?: "adb"
-    val serial =
-        System.getenv("ANDROID_SERIAL")?.takeIf { it.isNotBlank() }
-            ?: capture(adb, "devices")
-                ?.lines()
-                ?.drop(1)
-                ?.mapNotNull { line ->
-                    line.trim().takeIf { it.endsWith("\tdevice") }?.substringBefore('\t')
-                }
-                ?.singleOrNull()
-            ?: return null
-    return capture(adb, "-s", serial, "shell", "getprop", "ro.product.cpu.abi")?.takeIf {
-        it in knownAbis
-    }
-}
-
-fun hostAbi(): String =
-    when (System.getProperty("os.arch")) {
-        "aarch64",
-        "arm64" -> "arm64-v8a"
-        "x86_64",
-        "amd64" -> "x86_64"
-        else -> error("Unsupported host architecture: ${System.getProperty("os.arch")}")
-    }
-
-val debugAbis = listOf(connectedDeviceAbi() ?: hostAbi())
 
 android {
     namespace = "io.ente.ensu"
@@ -86,27 +53,39 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            ndk { abiFilters += debugAbis }
+
+            // Build specifically for modern 64-bit Android phones.
+            ndk {
+                abiFilters += listOf("arm64-v8a")
+            }
         }
+
         release {
             signingConfig = signingConfigs.getByName("release")
-            ndk { abiFilters += knownAbis }
+
+            ndk {
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            }
         }
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+    }
 
     packaging {
-        resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+
         jniLibs {
             useLegacyPackaging = true
-            pickFirsts +=
-                setOf(
-                    "lib/arm64-v8a/libc++_shared.so",
-                    "lib/armeabi-v7a/libc++_shared.so",
-                    "lib/x86/libc++_shared.so",
-                    "lib/x86_64/libc++_shared.so",
-                )
+            pickFirsts += setOf(
+                "lib/arm64-v8a/libc++_shared.so",
+                "lib/armeabi-v7a/libc++_shared.so",
+                "lib/x86/libc++_shared.so",
+                "lib/x86_64/libc++_shared.so",
+            )
         }
     }
 
@@ -116,7 +95,11 @@ android {
     }
 }
 
-kotlin { compilerOptions { jvmTarget.set(JvmTarget.JVM_17) } }
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
 
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2025.02.00")
