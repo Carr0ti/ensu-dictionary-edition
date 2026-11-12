@@ -1,0 +1,54 @@
+
+name: Repair Ensu Dictionary 100K Pack
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out dictionary project
+        uses: actions/checkout@v4
+
+      - name: Download original 100K pack
+        uses: actions/download-artifact@v4
+        with:
+          name: ensu-dictionary-pack-100k
+          run-id: 43030962227
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          path: build/pack-artifact
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Zstandard
+        run: python -m pip install "zstandard==0.23.0"
+
+      - name: Repair and validate existing pack
+        run: |
+          python scripts/repair_ensu_pack_100k.py \
+            --pack-dir build/pack-artifact/semantic-pack/dictionary/dictionary-100k-v1
+
+      - name: Upload repaired 100K pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensu-dictionary-pack-100k-repaired
+          path: |
+            build/pack-artifact/semantic-pack/dictionary/dictionary-100k-v1/manifest.json
+            build/pack-artifact/semantic-pack/dictionary/dictionary-100k-v1/vectors.i8
+            build/pack-artifact/semantic-pack/dictionary/dictionary-100k-v1/meta.zst
+            build/pack-artifact/semantic-pack/dictionary/dictionary-100k-v1/meta.offsets
+            build/pack-artifact/semantic-pack/dictionary/dictionary-100k-v1/pack-report.json
+            build/pack-artifact/semantic-100k/pilot-report.json
+          if-no-files-found: error
+          retention-days: 14
