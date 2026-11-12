@@ -17,17 +17,18 @@ jobs:
   publish:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
+
     steps:
       - name: Check out dictionary development branch
         uses: actions/checkout@v4
         with:
           ref: dictionary-edition-dev
 
-      - name: Download validated 100K pack artifact
+      - name: Download repaired and validated 100K pack
         uses: actions/download-artifact@v4
         with:
-          name: ensu-dictionary-pack-100k
-          run-id: 43030962227
+          name: ensu-dictionary-pack-100k-repaired
+          run-id: 43202589286
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           path: release-input
@@ -36,23 +37,43 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           MANIFEST="$(find release-input -type f -name manifest.json -print -quit)"
           test -n "$MANIFEST"
           PACK_DIR="$(dirname "$MANIFEST")"
+
           mkdir -p release-assets
+
           for file in manifest.json vectors.i8 meta.zst meta.offsets; do
             test -s "$PACK_DIR/$file"
             cp "$PACK_DIR/$file" "release-assets/$file"
           done
-          ls -lh release-assets
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 4
+
+          cd release-assets
+
+          echo "Checking file sizes..."
+          test "$(stat -c %s manifest.json)" -eq 756
+          test "$(stat -c %s vectors.i8)" -eq 51200000
+          test "$(stat -c %s meta.zst)" -eq 6069487
+          test "$(stat -c %s meta.offsets)" -eq 6264
+
+          echo "Checking SHA256 hashes..."
+          echo "20824b508d4d420580b4daea3d7c08aa530076080320cf8324505d917c7db210  manifest.json" | sha256sum -c -
+          echo "3879720fd8456bb38697a97b15dbd9aab3cc3f0e8e6513a13320736b4e7f79a8  vectors.i8" | sha256sum -c -
+          echo "e524528b2eb81db5f3a95850c1502dcbb52787e9f6326cb4b344d4beb79494d3  meta.zst" | sha256sum -c -
+          echo "6cfa8d58ad41274082cc5d2e55308c59881adc97a407335d9d37ca2b85c714e6  meta.offsets" | sha256sum -c -
+
+          echo "All four pack files verified."
+          ls -lh
 
       - name: Publish or update the GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
           TAG="dictionary-100k-v1"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" \
               release-assets/manifest.json \
@@ -70,4 +91,5 @@ jobs:
               --title "Ensu Dictionary Semantic Pack 100K v1" \
               --notes "Validated 100,000-passage Ensu semantic retrieval pack. Built from Wiktionary data processed with Wiktextract. Wiktionary contributions are available under applicable CC BY-SA and GFDL terms. This release contains the four files required by Ensu."
           fi
+
           gh release view "$TAG" --json url,tagName,assets
