@@ -1,3 +1,4 @@
+
 name: Test 100K pack with Ensu Rust
 
 on:
@@ -23,11 +24,11 @@ jobs:
           ref: main
           path: upstream
 
-      - name: Download completed 100K pack
+      - name: Download repaired 100K pack
         uses: actions/download-artifact@v4
         with:
-          name: ensu-dictionary-pack-100k
-          run-id: 43030962227
+          name: ensu-dictionary-pack-100k-repaired
+          run-id: 43202589286
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           path: build/pack-artifact
