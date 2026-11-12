@@ -1,0 +1,55 @@
+
+name: Build Ensu Dictionary Android
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out dictionary development branch
+        uses: actions/checkout@v4
+        with:
+          ref: dictionary-edition-dev
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Vulkan build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake libvulkan-dev glslc spirv-headers
+
+      - name: Restore Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ensu-dictionary-android-gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ensu-dictionary-android-gradle-${{ runner.os }}-
+
+      - name: Generate native Kotlin bindings and run Android lint
+        run: ./android/scripts/lint.sh
+
+      - name: Build Ensu debug APK
+        working-directory: android
+        run: ./gradlew --build-cache :ensu:app:assembleDebug
+
+      - name: Upload Ensu debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensu-dictionary-edition-debug-apk
+          path: android/apps/ensu/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
