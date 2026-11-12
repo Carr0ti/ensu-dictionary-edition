@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """Test the 100K dictionary pack with Ensu's real Rust RetrievalIndex."""
 
@@ -20,8 +21,28 @@ TEST = r'''
                 .expect("100K directory env"),
         );
 
-        let expected = crate::config::knowledge_dataset("simplewiki")
-            .expect("Ensu simplewiki dataset config");
+        let expected = crate::config::knowledge_dataset("ensu-dictionary")
+            .expect("Ensu dictionary dataset config");
+
+        // Verify that the real dictionary configuration is being used.
+        assert_eq!(expected.stable_id, "ensu-dictionary");
+        assert_eq!(
+            expected.current_download_identity,
+            "dictionary-100k-v1"
+        );
+        assert_eq!(
+            expected.source_url_template,
+            "https://en.wiktionary.org/wiki/{title}"
+        );
+        assert!(expected.attribution.credit.contains("Wiktionary"));
+        assert_eq!(
+            expected.attribution.license_label,
+            "CC BY-SA 4.0"
+        );
+        assert_eq!(
+            expected.attribution.public_pack_url,
+            "https://github.com/Carr0ti/ensu-dictionary-edition/releases/tag/dictionary-100k-v1"
+        );
 
         let index = RetrievalIndex::open(&pack_dir, &expected).unwrap();
 
@@ -39,7 +60,7 @@ TEST = r'''
             !hit.title.trim().is_empty()
                 && !hit.text.trim().is_empty()
                 && hit.source_url.starts_with(
-                    "https://simple.wikipedia.org/wiki/"
+                    "https://en.wiktionary.org/wiki/"
                 )
         }));
 
