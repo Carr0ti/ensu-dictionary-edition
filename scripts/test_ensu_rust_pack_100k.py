@@ -24,7 +24,6 @@ TEST = r'''
         let expected = crate::config::knowledge_dataset("ensu-dictionary")
             .expect("Ensu dictionary dataset config");
 
-        // Verify that the real dictionary configuration is being used.
         assert_eq!(expected.stable_id, "ensu-dictionary");
         assert_eq!(
             expected.current_download_identity,
@@ -50,7 +49,7 @@ TEST = r'''
         assert_eq!(index.count, 100_000);
         assert_eq!(index.dim, 512);
 
-        // Read and parse all 100,000 passages through Ensu's real reader.
+        // Read all 100,000 passages through Ensu's real reader.
         let zero_query = vec![0.0_f32; index.dim];
         let all_hits = index.search(&zero_query, 100_000, 0.0).unwrap();
 
@@ -132,23 +131,25 @@ def main():
     if report.get("metadata_rows_validated") != 100_000:
         raise SystemExit("Expected 100,000 validated metadata rows.")
 
+    # Verify every pack file against the builder's report.
     for filename in required:
         path = source_pack / filename
 
         if not path.is_file():
             raise SystemExit(f"Missing pack file: {filename}")
 
-        expected = report["files"][filename]
+        expected_file = report["files"][filename]
         data = path.read_bytes()
 
-        if len(data) != expected["bytes"]:
+        if len(data) != expected_file["bytes"]:
             raise SystemExit(f"File size mismatch: {filename}")
 
         digest = hashlib.sha256(data).hexdigest()
 
-        if digest != expected["sha256"]:
+        if digest != expected_file["sha256"]:
             raise SystemExit(f"SHA256 mismatch: {filename}")
 
+    # Copy the pack into Ensu's expected dataset directory.
     pack_dir = (
         upstream
         / "target/ensu-dictionary-100k/dictionary-100k-v1"
@@ -162,6 +163,28 @@ def main():
     for filename in required:
         shutil.copy2(source_pack / filename, pack_dir / filename)
 
+    # IMPORTANT:
+    # Apply this fork's dictionary catalog to the upstream Ensu source.
+    project_root = Path(__file__).resolve().parents[1]
+
+    dictionary_config = (
+        project_root / "rust/crates/ensu/src/config/knowledge.rs"
+    )
+
+    upstream_config = (
+        upstream / "rust/crates/ensu/src/config/knowledge.rs"
+    )
+
+    if not dictionary_config.is_file():
+        raise SystemExit(
+            f"Dictionary config not found: {dictionary_config}"
+        )
+
+    shutil.copy2(dictionary_config, upstream_config)
+
+    print("Applied Ensu Dictionary Edition dataset catalog.")
+
+    # Inject the integration test into Ensu's real RetrievalIndex tests.
     original = index_rs.read_text(encoding="utf-8")
 
     marker = "#[cfg(test)]\npub(super) mod tests {"
