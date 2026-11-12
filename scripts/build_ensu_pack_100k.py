@@ -11,7 +11,7 @@ SOURCE_DIM, DIM, SCALE, ROWS_PER_BLOCK = 768, 512, 127, 128
 MAX_CHARS = 600
 DOC_PROMPT = "title: {title} | text: {text}"
 REVISION = "dictionary-100k-v1"
-URL_TEMPLATE = "https://simple.wikipedia.org/wiki/{title}"
+URL_TEMPLATE = "https://en.wikipedia.org/wiki/{title}"
 
 
 def sha256_file(path: Path) -> str:
