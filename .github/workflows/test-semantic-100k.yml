@@ -1,0 +1,90 @@
+
+name: Diagnose 100K semantic retrieval
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  semantic-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out Dictionary Edition
+        uses: actions/checkout@v4
+
+      - name: Download repaired 100K pack
+        uses: actions/download-artifact@v4
+        with:
+          name: ensu-dictionary-pack-100k-repaired
+          run-id: 43202589286
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          path: build/pack-artifact
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install embedding dependencies
+        env:
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
+            "llama-cpp-python==0.3.36" "zstandard==0.23.0"
+
+      - name: Download pinned EmbeddingGemma model
+        run: |
+          mkdir -p build/models
+          curl -L --fail --retry 5 --retry-delay 3 \
+            "https://huggingface.co/ente-ai/embeddinggemma-300m-gguf/resolve/957b55764bd672f51240ac026e3a23ac9459ee3c/embeddinggemma-300M-Q8_0.gguf" \
+            -o build/models/embeddinggemma-300M-Q8_0.gguf
+          echo "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63  build/models/embeddinggemma-300M-Q8_0.gguf" \
+            | sha256sum --check
+
+      - name: Check out Ente source
+        uses: actions/checkout@v4
+        with:
+          repository: ente/ente
+          ref: main
+          path: upstream
+
+      - name: Install Rust dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake libvulkan-dev glslc spirv-headers
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-workspaces: upstream/rust -> target
+
+      - name: Record Ente source revision
+        working-directory: upstream
+        run: git rev-parse HEAD
+
+      - name: Run semantic diagnostic
+        run: |
+          python scripts/test_ensu_semantic_100k.py \
+            --pack-dir build/pack-artifact/semantic-pack/dictionary/dictionary-100k-v1 \
+            --model build/models/embeddinggemma-300M-Q8_0.gguf \
+            --upstream-root upstream \
+            --output build/semantic-100k-report.json
+
+      - name: Upload diagnostic report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensu-semantic-100k-diagnostic-report
+          path: build/semantic-100k-*
+          if-no-files-found: warn
+          retention-days: 14
