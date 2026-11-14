@@ -50,6 +50,31 @@ def load_model(path: Path, threads: int):
     )
 
 
+def fit_passage(row: dict, max_chars: int) -> dict:
+    """Enforce the metadata text limit without discarding an entire passage."""
+    row = dict(row)
+    title = str(row.get("title", "")).strip()
+    text = str(row.get("text", "")).strip()
+
+    if len(text) > max_chars:
+        # Keep a complete prefix where possible. This handles pathological
+        # unbroken tokens and oversized context fields from source records.
+        clipped = text[:max_chars]
+        if " " in clipped:
+            clipped = clipped.rsplit(" ", 1)[0]
+        if not clipped:
+            clipped = text[:max_chars]
+        row["text"] = clipped.rstrip()
+
+    if not title or not row["text"]:
+        raise ValueError("Passage has an empty title or text")
+
+    if len(row["text"]) > max_chars:
+        raise ValueError(f"Unable to enforce passage limit for {title}")
+
+    return row
+
+
 def quantize_embedding(llm, row):
     prompt = DOC_PROMPT.format(
         title=row["title"],
@@ -97,33 +122,12 @@ def quantize_embedding(llm, row):
 def main():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--database",
-        default="build/dictionary.sqlite3",
-    )
-    parser.add_argument(
-        "--model",
-        default=MODEL_PATH,
-    )
-    parser.add_argument(
-        "--output",
-        required=True,
-    )
-    parser.add_argument(
-        "--shard-index",
-        type=int,
-        required=True,
-    )
-    parser.add_argument(
-        "--shard-count",
-        type=int,
-        default=16,
-    )
-    parser.add_argument(
-        "--max-chars",
-        type=int,
-        default=MAX_CHARS,
-    )
+    parser.add_argument("--database", default="build/dictionary.sqlite3")
+    parser.add_argument("--model", default=MODEL_PATH)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--shard-index", type=int, required=True)
+    parser.add_argument("--shard-count", type=int, default=16)
+    parser.add_argument("--max-chars", type=int, default=MAX_CHARS)
     parser.add_argument(
         "--threads",
         type=int,
@@ -154,23 +158,15 @@ def main():
     model_digest = sha256_file(model_path)
 
     if model_digest != MODEL_SHA256:
-        raise SystemExit(
-            f"Model SHA-256 mismatch: {model_digest}"
-        )
+        raise SystemExit(f"Model SHA-256 mismatch: {model_digest}")
 
     output.mkdir(parents=True, exist_ok=True)
 
-    uri = (
-        f"file:{database.resolve().as_posix()}?mode=ro"
-    )
-
+    uri = f"file:{database.resolve().as_posix()}?mode=ro"
     db = sqlite3.connect(uri, uri=True)
     db.row_factory = sqlite3.Row
 
-    state = dict(
-        db.execute("SELECT key, value FROM import_state")
-    )
-
+    state = dict(db.execute("SELECT key, value FROM import_state"))
     total_entries = db.execute(
         "SELECT COUNT(*) FROM entries"
     ).fetchone()[0]
@@ -192,14 +188,8 @@ def main():
         (args.shard_count, args.shard_index),
     ).fetchone()[0]
 
-    print(
-        f"Shard {args.shard_index + 1}/{args.shard_count}",
-        flush=True,
-    )
-    print(
-        f"Source entries: {expected_entries:,}",
-        flush=True,
-    )
+    print(f"Shard {args.shard_index + 1}/{args.shard_count}", flush=True)
+    print(f"Source entries: {expected_entries:,}", flush=True)
 
     model = load_model(model_path, args.threads)
 
@@ -210,45 +200,33 @@ def main():
     entries_without_passages = 0
     passage_count = 0
     max_observed = 0
+    clipped_passages = 0
 
     try:
         with (
             vector_path.open("wb") as vectors,
-            rows_path.open(
-                "w",
-                encoding="utf-8",
-                newline="\n",
-            ) as rows_out,
+            rows_path.open("w", encoding="utf-8", newline="\n") as rows_out,
         ):
             cursor = db.execute(
-                "SELECT id, raw_json FROM entries ORDER BY id"
+                """
+                SELECT id, raw_json
+                FROM entries
+                WHERE ((id - 1) % ?) = ?
+                ORDER BY id
+                """,
+                (args.shard_count, args.shard_index),
             )
 
             while True:
                 batch = cursor.fetchmany(2000)
-
                 if not batch:
                     break
 
                 for source in batch:
-                    if (
-                        (source["id"] - 1)
-                        % args.shard_count
-                        != args.shard_index
-                    ):
-                        continue
-
                     try:
                         record = json.loads(source["raw_json"])
-                        passages = make_passages(
-                            record,
-                            args.max_chars,
-                        )
-                    except (
-                        TypeError,
-                        ValueError,
-                        json.JSONDecodeError,
-                    ):
+                        passages = make_passages(record, args.max_chars)
+                    except (TypeError, ValueError, json.JSONDecodeError):
                         passages = []
 
                     if not passages:
@@ -257,23 +235,17 @@ def main():
 
                     entries_with_passages += 1
 
-                    for row in passages:
-                        title = row.get("title", "").strip()
-                        text = row.get("text", "").strip()
+                    for original_row in passages:
+                        original_text = str(
+                            original_row.get("text", "")
+                        ).strip()
 
-                        if not title or not text:
-                            raise ValueError(
-                                f"Invalid passage at entry {source['id']}"
-                            )
+                        row = fit_passage(original_row, args.max_chars)
 
-                        if len(text) > args.max_chars:
-                            raise ValueError(
-                                f"Passage exceeds character limit: {title}"
-                            )
+                        if len(original_text) > args.max_chars:
+                            clipped_passages += 1
 
-                        vectors.write(
-                            quantize_embedding(model, row)
-                        )
+                        vectors.write(quantize_embedding(model, row))
 
                         rows_out.write(
                             json.dumps(
@@ -287,7 +259,7 @@ def main():
                         passage_count += 1
                         max_observed = max(
                             max_observed,
-                            len(text),
+                            len(row["text"]),
                         )
 
                     if entries_with_passages % 100 == 0:
@@ -295,7 +267,8 @@ def main():
                             f"Shard {args.shard_index}: "
                             f"{entries_with_passages:,}/"
                             f"{expected_entries:,} records; "
-                            f"{passage_count:,} passages",
+                            f"{passage_count:,} passages; "
+                            f"{clipped_passages:,} clipped",
                             flush=True,
                         )
 
@@ -320,6 +293,7 @@ def main():
         "dimension": DIM,
         "max_chars": args.max_chars,
         "max_observed_passage_chars": max_observed,
+        "clipped_passages": clipped_passages,
         "duplicate_headwords_preserved": True,
         "all_usable_senses_preserved": True,
         "vectors_bytes": vector_path.stat().st_size,
@@ -331,10 +305,7 @@ def main():
         encoding="utf-8",
     )
 
-    print(
-        json.dumps(report, ensure_ascii=False, indent=2),
-        flush=True,
-    )
+    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
 
 
 if __name__ == "__main__":
