@@ -1,0 +1,157 @@
+
+name: Build complete Ensu dictionary pack
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  build-shards:
+    name: Build dictionary shard ${{ matrix.shard }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3]
+
+    steps:
+      - name: Check out selected branch
+        uses: actions/checkout@v4
+
+      - name: Download full source database
+        uses: actions/download-artifact@v4
+        with:
+          name: ensu-dictionary-sqlite
+          run-id: 42821286934
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          path: build
+
+      - name: Verify complete source database
+        run: |
+          test -s build/dictionary.sqlite3
+
+          python - <<'PY'
+          import sqlite3
+
+          db = sqlite3.connect(
+              "file:build/dictionary.sqlite3?mode=ro",
+              uri=True
+          )
+
+          state = dict(
+              db.execute(
+                  "SELECT key, value FROM import_state"
+              )
+          )
+
+          count = db.execute(
+              "SELECT COUNT(*) FROM entries"
+          ).fetchone()[0]
+
+          print(f"English entries: {count:,}")
+          print(f"Import complete: {state.get('complete')}")
+
+          assert state.get("complete") == "1"
+          assert count == 1499160
+
+          db.close()
+          PY
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install CPU embedding runtime
+        env:
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF"
+        run: |
+          python -m pip install --upgrade pip
+
+          python -m pip install --only-binary=:all: \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
+            "llama-cpp-python==0.3.36" \
+            "zstandard==0.23.0"
+
+      - name: Download and verify pinned EmbeddingGemma
+        run: |
+          mkdir -p build/models
+
+          curl -L --fail --retry 5 --retry-delay 3 \
+            "https://huggingface.co/ente-ai/embeddinggemma-300m-gguf/resolve/957b55764bd672f51240ac026e3a23ac9459ee3c/embeddinggemma-300M-Q8_0.gguf" \
+            -o build/models/embeddinggemma-300M-Q8_0.gguf
+
+          echo "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63  build/models/embeddinggemma-300M-Q8_0.gguf" \
+            | sha256sum --check
+
+      - name: Build every usable sense in this shard
+        run: |
+          python scripts/build_ensu_dictionary_shard.py \
+            --database build/dictionary.sqlite3 \
+            --model build/models/embeddinggemma-300M-Q8_0.gguf \
+            --output "build/shard-${{ matrix.shard }}" \
+            --shard-index "${{ matrix.shard }}" \
+            --shard-count 4 \
+            --threads 4
+
+      - name: Upload completed shard
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensu-dictionary-shard-${{ matrix.shard }}
+          path: build/shard-${{ matrix.shard }}/*
+          if-no-files-found: error
+          retention-days: 14
+
+  merge-and-validate:
+    name: Merge and validate complete pack
+    needs: build-shards
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out selected branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install metadata codec
+        run: |
+          python -m pip install "zstandard==0.23.0"
+
+      - name: Download all four completed shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ensu-dictionary-shard-*
+          path: build/shards
+
+      - name: Merge all passages and validate complete pack
+        run: |
+          python scripts/merge_ensu_dictionary_shards.py \
+            --shards-dir build/shards \
+            --shard-count 4 \
+            --output build/semantic-pack/dictionary/dictionary-full-v1
+
+      - name: Upload complete dictionary pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensu-dictionary-pack-full
+          path: |
+            build/semantic-pack/dictionary/dictionary-full-v1/manifest.json
+            build/semantic-pack/dictionary/dictionary-full-v1/vectors.i8
+            build/semantic-pack/dictionary/dictionary-full-v1/meta.zst
+            build/semantic-pack/dictionary/dictionary-full-v1/meta.offsets
+            build/semantic-pack/dictionary/dictionary-full-v1/pack-report.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
