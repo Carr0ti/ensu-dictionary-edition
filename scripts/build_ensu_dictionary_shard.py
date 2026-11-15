@@ -19,6 +19,7 @@ SOURCE_DIM = 768
 DIM = 512
 SCALE = 127
 MAX_CHARS = 600
+DEFAULT_EMBED_BATCH_SIZE = 8
 DOC_PROMPT = "title: {title} | text: {text}"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -57,8 +58,6 @@ def fit_passage(row: dict, max_chars: int) -> dict:
     text = str(row.get("text", "")).strip()
 
     if len(text) > max_chars:
-        # Keep a complete prefix where possible. This handles pathological
-        # unbroken tokens and oversized context fields from source records.
         clipped = text[:max_chars]
         if " " in clipped:
             clipped = clipped.rsplit(" ", 1)[0]
@@ -75,23 +74,8 @@ def fit_passage(row: dict, max_chars: int) -> dict:
     return row
 
 
-def quantize_embedding(llm, row):
-    prompt = DOC_PROMPT.format(
-        title=row["title"],
-        text=row["text"],
-    )
-
-    try:
-        result = llm.embed(prompt, normalize=False)
-    except TypeError:
-        result = llm.embed(prompt)
-
-    vector = (
-        result[0]
-        if result and isinstance(result[0], (list, tuple))
-        else result
-    )
-
+def quantize_vector(vector) -> bytes:
+    """L2-normalize the first 512 dimensions and quantize to signed int8."""
     if len(vector) != SOURCE_DIM:
         raise ValueError(
             f"Expected {SOURCE_DIM} dimensions, got {len(vector)}"
@@ -133,6 +117,11 @@ def main():
         type=int,
         default=max(1, min(4, os.cpu_count() or 2)),
     )
+    parser.add_argument(
+        "--embed-batch-size",
+        type=int,
+        default=DEFAULT_EMBED_BATCH_SIZE,
+    )
 
     args = parser.parse_args()
 
@@ -144,6 +133,9 @@ def main():
 
     if args.max_chars < 200:
         parser.error("--max-chars must be at least 200")
+
+    if args.embed_batch_size < 1 or args.embed_batch_size > 64:
+        parser.error("--embed-batch-size must be between 1 and 64")
 
     database = Path(args.database)
     model_path = Path(args.model)
@@ -190,6 +182,10 @@ def main():
 
     print(f"Shard {args.shard_index + 1}/{args.shard_count}", flush=True)
     print(f"Source entries: {expected_entries:,}", flush=True)
+    print(
+        f"Embedding batch size: {args.embed_batch_size}",
+        flush=True,
+    )
 
     model = load_model(model_path, args.threads)
 
@@ -201,6 +197,44 @@ def main():
     passage_count = 0
     max_observed = 0
     clipped_passages = 0
+    pending_rows = []
+
+    def flush_pending(vectors_out, rows_out):
+        nonlocal passage_count, max_observed
+
+        if not pending_rows:
+            return
+
+        prompts = [
+            DOC_PROMPT.format(
+                title=row["title"],
+                text=row["text"],
+            )
+            for row in pending_rows
+        ]
+
+        embeddings = model.embed(prompts, normalize=False)
+
+        if len(embeddings) != len(pending_rows):
+            raise ValueError(
+                "Embedding batch result count does not match input count: "
+                f"{len(embeddings)} != {len(pending_rows)}"
+            )
+
+        for row, embedding in zip(pending_rows, embeddings):
+            vectors_out.write(quantize_vector(embedding))
+            rows_out.write(
+                json.dumps(
+                    row,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            passage_count += 1
+            max_observed = max(max_observed, len(row["text"]))
+
+        pending_rows.clear()
 
     try:
         with (
@@ -245,32 +279,22 @@ def main():
                         if len(original_text) > args.max_chars:
                             clipped_passages += 1
 
-                        vectors.write(quantize_embedding(model, row))
+                        pending_rows.append(row)
 
-                        rows_out.write(
-                            json.dumps(
-                                row,
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            )
-                            + "\n"
-                        )
-
-                        passage_count += 1
-                        max_observed = max(
-                            max_observed,
-                            len(row["text"]),
-                        )
+                        if len(pending_rows) >= args.embed_batch_size:
+                            flush_pending(vectors, rows_out)
 
                     if entries_with_passages % 100 == 0:
                         print(
                             f"Shard {args.shard_index}: "
                             f"{entries_with_passages:,}/"
                             f"{expected_entries:,} records; "
-                            f"{passage_count:,} passages; "
+                            f"{passage_count + len(pending_rows):,} passages; "
                             f"{clipped_passages:,} clipped",
                             flush=True,
                         )
+
+            flush_pending(vectors, rows_out)
 
     finally:
         db.close()
@@ -294,6 +318,7 @@ def main():
         "max_chars": args.max_chars,
         "max_observed_passage_chars": max_observed,
         "clipped_passages": clipped_passages,
+        "embedding_batch_size": args.embed_batch_size,
         "duplicate_headwords_preserved": True,
         "all_usable_senses_preserved": True,
         "vectors_bytes": vector_path.stat().st_size,
