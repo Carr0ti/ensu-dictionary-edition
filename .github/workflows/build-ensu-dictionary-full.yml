@@ -9,16 +9,30 @@ permissions:
   contents: read
 
 jobs:
+  prepare:
+    name: Prepare shard matrix
+    runs-on: ubuntu-22.04
+    outputs:
+      shards: ${{ steps.matrix.outputs.shards }}
+    steps:
+      - name: Generate 128 shard indexes
+        id: matrix
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          print("shards=" + json.dumps({"shard": list(range(128))}))
+          PY
+
   build-shards:
     name: Build dictionary shard ${{ matrix.shard }}
+    needs: prepare
     runs-on: ubuntu-22.04
     timeout-minutes: 360
 
     strategy:
       fail-fast: false
-      max-parallel: 4
-      matrix:
-        shard: [0, 1, 2, 3]
+      max-parallel: 16
+      matrix: ${{ fromJson(needs.prepare.outputs.shards) }}
 
     steps:
       - name: Check out selected branch
@@ -36,31 +50,22 @@ jobs:
       - name: Verify complete source database
         run: |
           test -s build/dictionary.sqlite3
-
           python - <<'PY'
           import sqlite3
-
           db = sqlite3.connect(
               "file:build/dictionary.sqlite3?mode=ro",
               uri=True
           )
-
-          state = dict(
-              db.execute(
-                  "SELECT key, value FROM import_state"
-              )
-          )
-
+          state = dict(db.execute(
+              "SELECT key, value FROM import_state"
+          ))
           count = db.execute(
               "SELECT COUNT(*) FROM entries"
           ).fetchone()[0]
-
           print(f"English entries: {count:,}")
           print(f"Import complete: {state.get('complete')}")
-
           assert state.get("complete") == "1"
           assert count == 1499160
-
           db.close()
           PY
 
@@ -75,7 +80,6 @@ jobs:
           CMAKE_ARGS: "-DGGML_NATIVE=OFF"
         run: |
           python -m pip install --upgrade pip
-
           python -m pip install --only-binary=:all: \
             --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
             "llama-cpp-python==0.3.36" \
@@ -84,23 +88,22 @@ jobs:
       - name: Download and verify pinned EmbeddingGemma
         run: |
           mkdir -p build/models
-
           curl -L --fail --retry 5 --retry-delay 3 \
             "https://huggingface.co/ente-ai/embeddinggemma-300m-gguf/resolve/957b55764bd672f51240ac026e3a23ac9459ee3c/embeddinggemma-300M-Q8_0.gguf" \
             -o build/models/embeddinggemma-300M-Q8_0.gguf
-
           echo "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63  build/models/embeddinggemma-300M-Q8_0.gguf" \
             | sha256sum --check
 
-      - name: Build every usable sense in this shard
+      - name: Build dictionary shard
         run: |
           python scripts/build_ensu_dictionary_shard.py \
             --database build/dictionary.sqlite3 \
             --model build/models/embeddinggemma-300M-Q8_0.gguf \
             --output "build/shard-${{ matrix.shard }}" \
             --shard-index "${{ matrix.shard }}" \
-            --shard-count 4 \
-            --threads 4
+            --shard-count 128 \
+            --threads 4 \
+            --embed-batch-size 8
 
       - name: Upload completed shard
         uses: actions/upload-artifact@v4
@@ -129,7 +132,7 @@ jobs:
         run: |
           python -m pip install "zstandard==0.23.0"
 
-      - name: Download all four completed shards
+      - name: Download all 128 completed shards
         uses: actions/download-artifact@v4
         with:
           pattern: ensu-dictionary-shard-*
@@ -139,7 +142,7 @@ jobs:
         run: |
           python scripts/merge_ensu_dictionary_shards.py \
             --shards-dir build/shards \
-            --shard-count 4 \
+            --shard-count 128 \
             --output build/semantic-pack/dictionary/dictionary-full-v1
 
       - name: Upload complete dictionary pack
