@@ -33,13 +33,17 @@ REQUIRED = tuple(EXPECTED_HASHES)
 RUST_TEST = r'''
     #[test]
     fn opens_full_dictionary_pack_with_real_retrieval_index() {
+        use std::io::Read;
+
         let pack_dir = std::path::PathBuf::from(
             std::env::var("ENSU_DICTIONARY_FULL_DIR")
                 .expect("full dictionary directory env"),
         );
 
-        let mut expected = crate::config::knowledge_dataset("ensu-dictionary")
-            .expect("Ensu dictionary dataset config");
+        // Reuse an existing upstream dataset configuration.
+        // The full pack identity and URL are overridden below.
+        let mut expected = crate::config::knowledge_dataset("simplewiki")
+            .expect("existing Ensu dataset config");
 
         expected.current_download_identity = "dictionary-full-v1".to_owned();
         expected.max_chars = 600;
@@ -52,16 +56,19 @@ RUST_TEST = r'''
         assert_eq!(index.count, 2_008_148);
         assert_eq!(index.dim, 512);
 
-        // Use a real vector from the pack as the query.
-        let vector_bytes =
-            std::fs::read(pack_dir.join(KNOWLEDGE_VECTORS_FILE)).unwrap();
+        // Read only one real vector instead of loading the 1 GB file.
+        let mut vector_file =
+            std::fs::File::open(pack_dir.join(KNOWLEDGE_VECTORS_FILE)).unwrap();
 
-        let query = vector_bytes[..index.dim]
+        let mut query_bytes = vec![0_u8; index.dim];
+        vector_file.read_exact(&mut query_bytes).unwrap();
+
+        let query = query_bytes
             .iter()
             .map(|value| f32::from(*value as i8) / 127.0)
             .collect::<Vec<_>>();
 
-        // This searches the complete vector file through Ensu's Rust reader.
+        // Search the complete vector file through Ensu's actual Rust reader.
         let hits = index.search(&query, 10, 0.0).unwrap();
 
         assert!(!hits.is_empty());
