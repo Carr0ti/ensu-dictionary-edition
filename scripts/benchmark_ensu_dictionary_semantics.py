@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """Benchmark natural-language retrieval against the complete Ensu dictionary."""
 
@@ -34,8 +35,6 @@ COUNT = 2_008_148
 MAX_CHARS = 600
 URL_TEMPLATE = "https://en.wiktionary.org/wiki/{title}"
 
-# Each query accepts several legitimate dictionary answers.
-# This is a first benchmark set, not a claim that these are the only valid answers.
 CASES = [
     {
         "query": "to make something less severe, harmful, or serious",
@@ -205,7 +204,7 @@ RUST_TEST = r'''
         for case in cases {
             assert_eq!(case.vector.len(), 512, "bad vector: {}", case.query);
 
-            let hits = index.search(&case.vector, 10, 0.0).unwrap();
+            let hits = index.search(&case.vector, 50, 0.0).unwrap();
 
             let hit_rows = hits.iter().map(|hit| {
                 serde_json::json!({
@@ -298,9 +297,28 @@ def make_query_vectors(model_path: Path) -> list[dict]:
     return output
 
 
-def calculate_metrics(results: list[dict]) -> dict:
+def unique_headword_hits(hits: list[dict]) -> list[dict]:
+    """Keep the highest-ranked passage for each distinct dictionary headword."""
+    unique = []
+    seen = set()
+
+    for hit in hits:
+        title = hit["title"].strip().casefold()
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        unique.append(hit)
+
+    return unique
+
+
+def calculate_metrics(
+    results: list[dict],
+    ranking_field: str,
+    top_k: int = 10,
+) -> dict:
     top1 = 0
-    recall10 = 0
+    found_at_k = 0
     reciprocal_rank_total = 0.0
     category_stats: dict[str, dict] = {}
 
@@ -312,7 +330,7 @@ def calculate_metrics(results: list[dict]) -> dict:
 
         titles = [
             hit["title"].strip().casefold()
-            for hit in result["hits"]
+            for hit in result[ranking_field][:top_k]
         ]
 
         matching_ranks = [
@@ -323,37 +341,40 @@ def calculate_metrics(results: list[dict]) -> dict:
 
         found = bool(matching_ranks)
         first_rank = min(matching_ranks) if found else None
+        is_top1 = bool(titles) and titles[0] in expected
 
-        if titles and titles[0] in expected:
+        if is_top1:
             top1 += 1
 
         if found:
-            recall10 += 1
+            found_at_k += 1
             reciprocal_rank_total += 1.0 / first_rank
 
         category = result["category"]
         stats = category_stats.setdefault(
             category,
-            {"queries": 0, "found_at_10": 0, "top1": 0},
+            {"queries": 0, "found_at_k": 0, "top1": 0},
         )
         stats["queries"] += 1
-        stats["found_at_10"] += int(found)
-        stats["top1"] += int(bool(titles) and titles[0] in expected)
+        stats["found_at_k"] += int(found)
+        stats["top1"] += int(is_top1)
 
-        result["matched"] = found
-        result["first_matching_rank"] = first_rank
+        result[f"{ranking_field}_matched_at_{top_k}"] = found
+        result[f"{ranking_field}_first_matching_rank"] = first_rank
 
     total = len(results)
 
     return {
+        "ranking_basis": ranking_field,
+        "top_k": top_k,
         "queries": total,
         "top1_accuracy": top1 / total if total else 0,
-        "recall_at_10": recall10 / total if total else 0,
+        "recall_at_k": found_at_k / total if total else 0,
         "mean_reciprocal_rank": (
             reciprocal_rank_total / total if total else 0
         ),
         "top1_correct": top1,
-        "found_in_top10": recall10,
+        "found_in_top_k": found_at_k,
         "categories": category_stats,
     }
 
@@ -474,7 +495,27 @@ def main() -> None:
             f"Expected {len(CASES)} benchmark results; got {len(results)}"
         )
 
-    metrics = calculate_metrics(results)
+    for result in results:
+        passage_hits = result["hits"]
+        result["passage_hits"] = passage_hits
+        result["unique_headword_hits"] = unique_headword_hits(passage_hits)
+        del result["hits"]
+
+    passage_metrics = calculate_metrics(
+        results,
+        ranking_field="passage_hits",
+        top_k=10,
+    )
+    unique_headword_metrics = calculate_metrics(
+        results,
+        ranking_field="unique_headword_hits",
+        top_k=10,
+    )
+
+    metrics = {
+        "passage_top10": passage_metrics,
+        "unique_headword_top10": unique_headword_metrics,
+    }
 
     report = {
         "dataset": IDENTITY,
@@ -482,13 +523,17 @@ def main() -> None:
         "model": MODEL_IDENTITY,
         "query_prompt": QUERY_PROMPT,
         "dimensions": DIM,
-        "benchmark_version": 1,
+        "benchmark_version": 2,
+        "retrieved_passages_per_query": 50,
         "metrics": metrics,
         "results": results,
         "interpretation": (
-            "A matching expected headword in the top 10 counts as a hit. "
-            "This benchmark measures retrieval ranking, not definition "
-            "completeness or dictionary editorial quality."
+            "Passage metrics rank the top 10 raw passages. Unique-headword "
+            "metrics first collapse repeated titles, keeping the highest "
+            "ranked passage for each title, then evaluate the top 10 unique "
+            "headwords. Expected-title matching is exact after trimming "
+            "and case-folding. This measures retrieval ranking, not "
+            "definition completeness or dictionary editorial quality."
         ),
     }
 
