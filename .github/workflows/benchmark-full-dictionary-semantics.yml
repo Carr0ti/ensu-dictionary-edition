@@ -1,0 +1,91 @@
+
+name: Benchmark full dictionary semantic search
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  semantic-benchmark:
+    name: Run full dictionary semantic benchmark
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out dictionary project
+        uses: actions/checkout@v4
+
+      - name: Download existing full dictionary pack
+        uses: actions/download-artifact@v4
+        with:
+          name: ensu-dictionary-pack-full
+          repository: Carr0ti/ensu-dictionary-edition
+          run-id: 43694896452
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: build/full-pack/dictionary-full-v1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CPU embedding runtime
+        env:
+          CMAKE_ARGS: "-DGGML_NATIVE=OFF"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
+            "llama-cpp-python==0.3.36"
+
+      - name: Download and verify pinned EmbeddingGemma
+        run: |
+          mkdir -p build/models
+          curl -L --fail --retry 5 --retry-delay 3 \
+            "https://huggingface.co/ente-ai/embeddinggemma-300m-gguf/resolve/957b55764bd672f51240ac026e3a23ac9459ee3c/embeddinggemma-300M-Q8_0.gguf" \
+            -o build/models/embeddinggemma-300M-Q8_0.gguf
+
+          echo "b5ce9d77a3fc4b3b39ccb5643c36777911cc4eb46a66962eadfa3f5f60490d63  build/models/embeddinggemma-300M-Q8_0.gguf" \
+            | sha256sum --check
+
+      - name: Check out Ente source
+        uses: actions/checkout@v4
+        with:
+          repository: ente/ente
+          ref: main
+          path: upstream
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake libvulkan-dev glslc spirv-headers
+
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-workspaces: upstream/rust -> target
+
+      - name: Record Ente source revision
+        working-directory: upstream
+        run: git rev-parse HEAD
+
+      - name: Run semantic benchmark
+        run: |
+          python scripts/benchmark_ensu_dictionary_semantics.py \
+            --pack-dir build/full-pack/dictionary-full-v1 \
+            --upstream-root upstream \
+            --model build/models/embeddinggemma-300M-Q8_0.gguf \
+            --report build/semantic-benchmark-report.json
+
+      - name: Upload semantic benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensu-full-dictionary-semantic-benchmark
+          path: build/semantic-benchmark-report.json
+          if-no-files-found: warn
+          retention-days: 14
