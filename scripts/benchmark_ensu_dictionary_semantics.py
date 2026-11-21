@@ -398,7 +398,7 @@ def main() -> None:
     print("Generating real query embeddings with the pinned model...", flush=True)
     cases = make_query_vectors(model_path)
 
-    query_file = Path("build/semantic-benchmark-queries.json")
+    query_file = Path("build/semantic-benchmark-queries.json").resolve()
     query_file.parent.mkdir(parents=True, exist_ok=True)
     query_file.write_text(
         json.dumps(cases, ensure_ascii=False),
