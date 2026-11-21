@@ -1,0 +1,77 @@
+
+name: Test full Ensu dictionary pack
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  full-pack-test:
+    name: Validate full dictionary and Rust retrieval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out dictionary project
+        uses: actions/checkout@v4
+
+      - name: Download existing full dictionary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ensu-dictionary-pack-full
+          repository: Carr0ti/ensu-dictionary-edition
+          run-id: 43694896452
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: build/full-pack/dictionary-full-v1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install metadata validation dependency
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "zstandard==0.23.0"
+
+      - name: Check out Ente source
+        uses: actions/checkout@v4
+        with:
+          repository: ente/ente
+          ref: main
+          path: upstream
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake libvulkan-dev glslc spirv-headers
+
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-workspaces: upstream/rust -> target
+
+      - name: Record Ente source revision
+        working-directory: upstream
+        run: git rev-parse HEAD
+
+      - name: Validate full pack and test actual Rust retrieval
+        run: |
+          python scripts/test_ensu_full_dictionary_pack.py \
+            --pack-dir build/full-pack/dictionary-full-v1 \
+            --upstream-root upstream
+
+      - name: Upload pack build report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensu-full-pack-build-report
+          path: |
+            build/full-pack/dictionary-full-v1/manifest.json
+            build/full-pack/dictionary-full-v1/pack-report.json
+          if-no-files-found: warn
+          retention-days: 14
