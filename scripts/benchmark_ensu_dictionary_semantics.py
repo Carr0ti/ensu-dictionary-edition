@@ -210,6 +210,7 @@ RUST_TEST = r'''
                 serde_json::json!({
                     "title": hit.title,
                     "section": hit.section,
+                    "text": hit.text,
                     "score": hit.score
                 })
             }).collect::<Vec<_>>();
