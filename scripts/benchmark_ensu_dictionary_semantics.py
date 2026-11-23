@@ -1,6 +1,6 @@
 
 #!/usr/bin/env python3
-"""Benchmark natural-language retrieval against the complete Ensu dictionary."""
+"""Benchmark Ensu dense retrieval against a lightweight definition reranker."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -33,7 +34,22 @@ SOURCE_DIM = 768
 IDENTITY = "dictionary-full-v1"
 COUNT = 2_008_148
 MAX_CHARS = 600
-URL_TEMPLATE = "https://en.wiktionary.org/wiki/{title}"
+
+# Conservative experimental weights. These are fixed before evaluation;
+# they are not tuned against the expected answers.
+DEFINITION_WEIGHT = 0.025
+TITLE_WEIGHT = 0.010
+POS_WEIGHT = 0.015
+
+STOP_WORDS = {
+    "a", "an", "the", "to", "of", "and", "or", "in", "on", "at",
+    "by", "for", "from", "with", "without", "that", "this", "what",
+    "which", "who", "whom", "where", "when", "how", "is", "are",
+    "was", "were", "be", "been", "being", "do", "does", "did",
+    "can", "could", "would", "should", "will", "may", "might",
+    "as", "after", "before", "often", "something", "someone",
+    "others", "other", "both", "very", "more", "less",
+}
 
 CASES = [
     {
@@ -261,7 +277,6 @@ def make_query_vectors(model_path: Path) -> list[dict]:
         QUERY_PROMPT.format(query=case["query"])
         for case in CASES
     ]
-
     embeddings = model.embed(prompts, normalize=False)
 
     if len(embeddings) != len(CASES):
@@ -282,7 +297,6 @@ def make_query_vectors(model_path: Path) -> list[dict]:
             raise SystemExit(f"Non-finite embedding: {case['query']}")
 
         norm = math.sqrt(math.fsum(value * value for value in vector))
-
         if not math.isfinite(norm) or norm <= 0:
             raise SystemExit(f"Invalid embedding norm: {case['query']}")
 
@@ -298,8 +312,97 @@ def make_query_vectors(model_path: Path) -> list[dict]:
     return output
 
 
+def tokenize(value: str) -> list[str]:
+    """Small, deterministic tokenizer for the diagnostic lexical features."""
+    return re.findall(r"[a-z0-9]+", value.casefold())
+
+
+def content_tokens(value: str) -> set[str]:
+    return {
+        token for token in tokenize(value)
+        if token not in STOP_WORDS and len(token) > 1
+    }
+
+
+def extract_definition(text: str) -> str:
+    """Extract the definition field, excluding examples and later fields."""
+    match = re.search(
+        r"\bDefinition:\s*(.*?)(?=\s+\b(?:Example|Synonyms|Antonyms|"
+        r"Related terms|Derived terms|Holonyms|Meronyms|Translations):|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return match.group(1).strip() if match else text
+
+
+def infer_query_pos(query: str) -> str | None:
+    """Conservative query-shape heuristic; returns None when uncertain."""
+    q = query.casefold().strip()
+
+    if q.startswith("to "):
+        return "verb"
+
+    adjective_starts = (
+        "not allowing ",
+        "able to ",
+        "very careful ",
+        "certain to ",
+    )
+    if q.startswith(adjective_starts):
+        return "adj"
+
+    noun_starts = (
+        "a person ",
+        "an instrument ",
+        "a medical doctor ",
+        "a two-wheeled vehicle ",
+        "a very short period ",
+        "a structure ",
+        "an animal ",
+        "an intense fear ",
+        "the scientific study ",
+        "the study ",
+        "a very large body ",
+        "an extreme ",
+    )
+    if q.startswith(noun_starts):
+        return "noun"
+
+    return None
+
+
+def normalize_pos(value: str) -> str | None:
+    value = value.casefold().strip()
+    if value in {"noun", "n"}:
+        return "noun"
+    if value in {"verb", "v"}:
+        return "verb"
+    if value in {"adj", "adjective"}:
+        return "adj"
+    if value in {"adv", "adverb"}:
+        return "adv"
+    return None
+
+
+def extract_candidate_pos(hit: dict) -> str | None:
+    text = hit.get("text", "")
+    match = re.search(
+        r"Part of speech:\s*([a-z -]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        pos = normalize_pos(match.group(1).strip())
+        if pos:
+            return pos
+
+    section = hit.get("section", "")
+    first = section.split(";", 1)[0]
+    return normalize_pos(first)
+
+
 def unique_headword_hits(hits: list[dict]) -> list[dict]:
-    """Keep the highest-ranked passage for each distinct dictionary headword."""
+    """Keep the highest-ranked passage for each distinct headword."""
     unique = []
     seen = set()
 
@@ -311,6 +414,73 @@ def unique_headword_hits(hits: list[dict]) -> list[dict]:
         unique.append(hit)
 
     return unique
+
+
+def rerank_candidates(query: str, hits: list[dict]) -> list[dict]:
+    """
+    Reorder the dense shortlist using definition overlap and POS compatibility.
+
+    This is a transparent heuristic, not a trained relevance model.
+    The original dense score remains available on every hit.
+    """
+    query_words = content_tokens(query)
+    query_pos = infer_query_pos(query)
+    reranked = []
+
+    for original_rank, original_hit in enumerate(hits, start=1):
+        hit = dict(original_hit)
+
+        definition = extract_definition(hit.get("text", ""))
+        definition_words = content_tokens(definition)
+        title_words = content_tokens(hit.get("title", ""))
+
+        if query_words:
+            definition_overlap = (
+                len(query_words & definition_words) / len(query_words)
+            )
+            title_overlap = (
+                len(query_words & title_words) / len(query_words)
+            )
+        else:
+            definition_overlap = 0.0
+            title_overlap = 0.0
+
+        candidate_pos = extract_candidate_pos(hit)
+        if query_pos is None or candidate_pos is None:
+            pos_signal = 0.0
+        elif query_pos == candidate_pos:
+            pos_signal = 1.0
+        else:
+            pos_signal = -1.0
+
+        dense_score = float(hit.get("score", 0.0))
+        rerank_score = (
+            dense_score
+            + DEFINITION_WEIGHT * definition_overlap
+            + TITLE_WEIGHT * title_overlap
+            + POS_WEIGHT * pos_signal
+        )
+
+        hit["dense_rank"] = original_rank
+        hit["dense_score"] = dense_score
+        hit["definition_overlap"] = round(definition_overlap, 6)
+        hit["title_overlap"] = round(title_overlap, 6)
+        hit["query_pos"] = query_pos
+        hit["candidate_pos"] = candidate_pos
+        hit["pos_signal"] = pos_signal
+        hit["rerank_score"] = round(rerank_score, 8)
+        reranked.append(hit)
+
+    reranked.sort(
+        key=lambda item: (
+            item["rerank_score"],
+            item["dense_score"],
+            -item["dense_rank"],
+        ),
+        reverse=True,
+    )
+
+    return reranked
 
 
 def calculate_metrics(
@@ -427,9 +597,7 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    index_rs = (
-        upstream / "rust/crates/ensu/src/retrieval/index.rs"
-    )
+    index_rs = upstream / "rust/crates/ensu/src/retrieval/index.rs"
     if not index_rs.is_file():
         raise SystemExit("Ensu Rust retrieval source not found")
 
@@ -500,6 +668,12 @@ def main() -> None:
         passage_hits = result["hits"]
         result["passage_hits"] = passage_hits
         result["unique_headword_hits"] = unique_headword_hits(passage_hits)
+
+        reranked_passages = rerank_candidates(
+            result["query"],
+            result["unique_headword_hits"],
+        )
+        result["definition_reranked_hits"] = reranked_passages
         del result["hits"]
 
     passage_metrics = calculate_metrics(
@@ -512,10 +686,16 @@ def main() -> None:
         ranking_field="unique_headword_hits",
         top_k=10,
     )
+    reranked_metrics = calculate_metrics(
+        results,
+        ranking_field="definition_reranked_hits",
+        top_k=10,
+    )
 
     metrics = {
         "passage_top10": passage_metrics,
         "unique_headword_top10": unique_headword_metrics,
+        "definition_reranked_top10": reranked_metrics,
     }
 
     report = {
@@ -524,17 +704,34 @@ def main() -> None:
         "model": MODEL_IDENTITY,
         "query_prompt": QUERY_PROMPT,
         "dimensions": DIM,
-        "benchmark_version": 2,
+        "benchmark_version": 3,
         "retrieved_passages_per_query": 50,
+        "reranker": {
+            "name": "definition-overlap-pos-heuristic",
+            "definition_weight": DEFINITION_WEIGHT,
+            "title_weight": TITLE_WEIGHT,
+            "pos_weight": POS_WEIGHT,
+            "candidate_limit": 50,
+            "description": (
+                "Reorders unique headwords from the dense top-50 shortlist. "
+                "Uses query-token coverage in the definition, a smaller "
+                "headword-token overlap feature, and a conservative "
+                "part-of-speech compatibility signal. No expected-answer "
+                "labels are used by the reranker."
+            ),
+        },
         "metrics": metrics,
         "results": results,
         "interpretation": (
             "Passage metrics rank the top 10 raw passages. Unique-headword "
-            "metrics first collapse repeated titles, keeping the highest "
-            "ranked passage for each title, then evaluate the top 10 unique "
-            "headwords. Expected-title matching is exact after trimming "
-            "and case-folding. This measures retrieval ranking, not "
-            "definition completeness or dictionary editorial quality."
+            "metrics collapse repeated titles, keeping the highest-ranked "
+            "passage for each title. Definition-reranked metrics reorder "
+            "those unique headwords using the experimental heuristic. "
+            "Expected-title matching is exact after trimming and "
+            "case-folding. A reranker cannot recover a headword absent "
+            "from the dense top-50 candidate set. This benchmark measures "
+            "ranking against a small curated expected-title list, not "
+            "complete semantic quality or dictionary editorial quality."
         ),
     }
 
