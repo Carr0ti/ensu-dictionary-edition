@@ -10,9 +10,9 @@ permissions:
 
 jobs:
   semantic-benchmark:
-    name: Run full dictionary semantic benchmark
+    name: Run expanded full dictionary semantic benchmark
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - name: Check out dictionary project
@@ -73,9 +73,9 @@ jobs:
         working-directory: upstream
         run: git rev-parse HEAD
 
-      - name: Run semantic benchmark
+      - name: Run expanded 131-query semantic benchmark
         run: |
-          python scripts/benchmark_ensu_dictionary_semantics.py \
+          python scripts/benchmark_ensu_dictionary_semantics_expanded.py \
             --pack-dir build/full-pack/dictionary-full-v1 \
             --upstream-root upstream \
             --model build/models/embeddinggemma-300M-Q8_0.gguf \
@@ -85,7 +85,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ensu-full-dictionary-semantic-benchmark
+          name: ensu-full-dictionary-semantic-benchmark-expanded
           path: build/semantic-benchmark-report.json
           if-no-files-found: warn
           retention-days: 14
